@@ -4,8 +4,9 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = 7,
+    version = 12,
     protocol = "xenitchat_bus",
+    updateUrl = "https://raw.githubusercontent.com/benchware/Xenit-Chat/main/xenitchat.lua",
 
     accountFile = ".xenit_accounts",
     nodeSecretFile = ".xenit_node_secret",
@@ -34,6 +35,20 @@ local THEMES = {
         accent = colors.cyan,
         good = colors.lime,
         warn = colors.orange,
+        danger = colors.red,
+        text = colors.white,
+        muted = colors.lightGray,
+        input = colors.black,
+        inputText = colors.white
+    },
+    midnight = {
+        name = "Midnight",
+        bg = colors.black,
+        panel = colors.gray,
+        top = colors.black,
+        accent = colors.lightBlue,
+        good = colors.lime,
+        warn = colors.yellow,
         danger = colors.red,
         text = colors.white,
         muted = colors.lightGray,
@@ -109,13 +124,23 @@ local state = {
     discover = {},
 
     friends = {},
+    friendRequests = {
+        inbox = {},
+        sent = {}
+    },
     blocked = {},
+    blockedInfo = {},
+    leftGroups = {},
+    updateChecked = false,
+    updateBusy = false,
+    packetSeen = {},
+    packetSeenOrder = {},
     profile = {
         display = "",
         status = "Available"
     },
 
-    theme = "dark",
+    theme = "midnight",
     buttons = {},
     convoClicks = {}
 }
@@ -210,33 +235,50 @@ local function trim(value, maxLen)
     return s
 end
 
+local function isTiny()
+    return w < 28 or h < 13
+end
+
 local function isPocket()
-    return w <= 30 or h <= 18
+    return w < 50 or h < 18
 end
 
 local function isSmall()
-    return w < 48
+    return w < 58 or h < 18
+end
+
+local function hasSidebar()
+    return w >= 58 and h >= 16
 end
 
 local function leftWidth()
-    if isPocket() or isSmall() then return 0 end
-    return 19
+    if not hasSidebar() then return 0 end
+    if w < 72 then return 18 end
+    if w < 92 then return 22 end
+    return math.min(28, math.floor(w * 0.26))
+end
+
+local function inputRows()
+    if h <= 13 then return 1 end
+    return 2
+end
+
+local function bottomChromeRows()
+    return inputRows() + 2
 end
 
 local function messageArea()
     local lw = leftWidth()
+    local top = lw == 0 and 3 or 2
+    local bottom = h - bottomChromeRows() - 1
+
+    if bottom < top then bottom = top end
 
     if lw == 0 then
-        local top = 3
-        local bottom = h - 5
-        if bottom < top then bottom = top end
-        return 1, top, w, bottom, bottom - top + 1
+        return 1, top, w, bottom, math.max(1, bottom - top + 1)
     end
 
-    local top = 2
-    local bottom = h - 5
-    if bottom < top then bottom = top end
-    return lw + 1, top, w - lw, bottom, bottom - top + 1
+    return lw + 1, top, w - lw, bottom, math.max(1, bottom - top + 1)
 end
 
 local function clearClickable()
@@ -245,9 +287,16 @@ local function clearClickable()
 end
 
 local function addButton(id, x, y, width, label, color, background, action)
-    width = math.max(2, width)
+    if y < 1 or y > h then return end
+
+    x = math.floor(tonumber(x) or 1)
+    y = math.floor(tonumber(y) or 1)
+    width = math.floor(tonumber(width) or 1)
 
     if x < 1 then x = 1 end
+    if x > w then return end
+
+    width = math.max(1, width)
     if x + width - 1 > w then
         width = w - x + 1
     end
@@ -262,11 +311,7 @@ local function addButton(id, x, y, width, label, color, background, action)
         action = action
     }
 
-    local display = tostring(label or "")
-
-    if #display > width then
-        display = display:sub(1, width)
-    end
+    local display = trim(label or "", width)
 
     local pad = math.max(0, width - #display)
     local left = math.floor(pad / 2)
@@ -502,13 +547,19 @@ local function defaultPrefs()
     return {
         remember = true,
         username = nil,
-        theme = "dark",
+        theme = "midnight",
         profile = {
             display = "",
             status = "Available"
         },
         friends = {},
+        friendRequests = {
+            inbox = {},
+            sent = {}
+        },
         blocked = {},
+        blockedInfo = {},
+        leftGroups = {},
         convos = {
             global = {
                 key = "global",
@@ -531,7 +582,10 @@ local function savePrefs()
         theme = state.theme,
         profile = state.profile,
         friends = state.friends,
+        friendRequests = state.friendRequests,
         blocked = state.blocked,
+        blockedInfo = state.blockedInfo,
+        leftGroups = state.leftGroups,
         convos = state.convos
     }
 
@@ -544,14 +598,22 @@ local function loadPrefs()
     if type(data) ~= "table" then data = defaultPrefs() end
     if type(data.convos) ~= "table" then data.convos = defaultPrefs().convos end
     if type(data.friends) ~= "table" then data.friends = {} end
+    if type(data.friendRequests) ~= "table" then data.friendRequests = { inbox = {}, sent = {} } end
+    if type(data.friendRequests.inbox) ~= "table" then data.friendRequests.inbox = {} end
+    if type(data.friendRequests.sent) ~= "table" then data.friendRequests.sent = {} end
     if type(data.blocked) ~= "table" then data.blocked = {} end
+    if type(data.blockedInfo) ~= "table" then data.blockedInfo = {} end
+    if type(data.leftGroups) ~= "table" then data.leftGroups = {} end
     if type(data.profile) ~= "table" then data.profile = { display = "", status = "Available" } end
 
     state.remember = data.remember ~= false
-    state.theme = THEMES[data.theme] and data.theme or "dark"
+    state.theme = THEMES[data.theme] and data.theme or "midnight"
     state.profile = data.profile
     state.friends = data.friends
+    state.friendRequests = data.friendRequests
     state.blocked = data.blocked
+    state.blockedInfo = data.blockedInfo
+    state.leftGroups = data.leftGroups
     state.convos = data.convos
 
     if not state.convos.global then
@@ -591,7 +653,8 @@ end
 
 local function getInputLines()
     local raw = "> " .. tostring(state.input or "")
-    local lines = splitFixed(raw, w)
+    local width = math.max(1, w - leftWidth())
+    local lines = splitFixed(raw, width)
     local visible = {}
 
     if #lines == 1 then
@@ -625,16 +688,19 @@ local function ensureConvo(key, title, kind, private, listed, owner, peerId)
             owner = owner or "unknown",
             peerId = peerId,
             unread = 0,
-            last = 0
+            last = 0,
+            renamedBy = nil
         }
     else
         local c = state.convos[key]
-        c.title = title or c.title or key
-        c.type = kind or c.type or "public"
-        c.private = private or c.private or false
-        c.listed = listed ~= false
-        c.owner = owner or c.owner
-        c.peerId = peerId or c.peerId
+
+        -- Existing chats should not be accidentally downgraded by generic message writes.
+        if title and title ~= "" and title ~= key then c.title = title end
+        if kind and not (c.type == "pm" and kind == "public") then c.type = kind end
+        if private ~= nil then c.private = private end
+        if listed ~= nil then c.listed = listed end
+        if owner and owner ~= "unknown" then c.owner = owner end
+        if peerId then c.peerId = peerId end
     end
 
     if not state.messages[key] then
@@ -647,7 +713,10 @@ end
 
 local function addMessage(key, from, body, kind, meta)
     key = key or "global"
-    ensureConvo(key, key, "public", false, true, "unknown")
+
+    if not state.convos[key] then
+        ensureConvo(key, key, kind == "pm" and "pm" or "public", kind == "pm", kind ~= "pm", "unknown")
+    end
 
     if not state.messages[key] then
         state.messages[key] = {}
@@ -919,6 +988,94 @@ local function onlineCount()
     return count
 end
 
+local function pendingFriendCount()
+    local count = 0
+
+    if state.friendRequests and state.friendRequests.inbox then
+        for _ in pairs(state.friendRequests.inbox) do
+            count = count + 1
+        end
+    end
+
+    return count
+end
+
+local function totalUnread()
+    local count = 0
+
+    for _, c in pairs(state.convos or {}) do
+        count = count + (c.unread or 0)
+    end
+
+    return count
+end
+
+local function peerDisplayName(publicId, fallback)
+    local user = state.users[publicId]
+    local friend = state.friends[publicId]
+    local reqIn = state.friendRequests and state.friendRequests.inbox and state.friendRequests.inbox[publicId]
+    local reqOut = state.friendRequests and state.friendRequests.sent and state.friendRequests.sent[publicId]
+    local info = user or friend or reqIn or reqOut or {}
+
+    return displayName(info.username or fallback or "unknown", publicId, info.profile or {})
+end
+
+local function chatLabel(c, compact)
+    if not c then return "#global" end
+
+    if c.type == "pm" then
+        local name = peerDisplayName(c.peerId, c.title or c.key)
+        if compact then return "DM " .. name end
+        return "Direct message: " .. name
+    end
+
+    if c.key == "global" then return "#global" end
+    return "#" .. tostring(c.title or c.key)
+end
+
+local function currentChatTitle()
+    return chatLabel(state.convos[state.current], true)
+end
+
+local function cleanGroupTitle(value)
+    local s = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    s = s:gsub("%s+", " ")
+    s = s:gsub("[\n\r\t]", " ")
+
+    if #s > 28 then s = s:sub(1, 28) end
+    return s
+end
+
+local function canManageGroup(c)
+    return c and c.type ~= "pm" and c.key ~= "global"
+end
+
+local function relationMark(publicId)
+    if state.friends[publicId] then return "*" end
+    if state.friendRequests and state.friendRequests.inbox and state.friendRequests.inbox[publicId] then return "!" end
+    if state.friendRequests and state.friendRequests.sent and state.friendRequests.sent[publicId] then return "?" end
+    return " "
+end
+
+local function openMainMenu()
+    state.modal = "main_menu"
+    state.modalInput = ""
+    state.modalData = nil
+end
+
+local function openChatsModal()
+    state.modal = "chats"
+    state.modalInput = ""
+    state.modalData = nil
+end
+
+local function clearCurrentChat()
+    if state.current and state.messages[state.current] then
+        state.messages[state.current] = {}
+        systemMessage("Chat history cleared locally.", state.current)
+    end
+end
+
 local function getSortedUsers()
     local now = os.clock()
     local list = {}
@@ -1048,15 +1205,141 @@ local function sendTo(id, kind, data)
     rednet.send(id, makePacket(kind, data), APP.protocol)
 end
 
+
+-- ============================================================
+-- Auto update
+-- ============================================================
+
+local function getProgramPath()
+    if shell and shell.getRunningProgram then
+        local ok, path = pcall(shell.getRunningProgram)
+        if ok and path and path ~= "" then return path end
+    end
+
+    return "xenitchat.lua"
+end
+
+local function httpRead(url)
+    if not http or not http.get then
+        return nil, "HTTP API is disabled. Enable http in CraftOS-PC/CC config."
+    end
+
+    local ok, handle = pcall(http.get, url)
+    if not ok or not handle then
+        return nil, "Could not reach GitHub raw file."
+    end
+
+    local raw = handle.readAll()
+    handle.close()
+
+    if not raw or raw == "" then
+        return nil, "Downloaded file was empty."
+    end
+
+    return raw, nil
+end
+
+local function parseRemoteVersion(raw)
+    local found = raw:match("version%s*=%s*(%d+)")
+    return tonumber(found)
+end
+
+local function validateUpdate(raw)
+    if type(raw) ~= "string" then return false, "Bad download." end
+    if not raw:find("XenitChat", 1, true) then return false, "Remote file is not XenitChat." end
+    if not raw:find("local APP%s*=") then return false, "Remote file has no APP block." end
+    if not raw:find("boot%(%s*%)") then return false, "Remote file has no boot call." end
+
+    local loader = loadstring or load
+    if loader then
+        local ok, err = pcall(loader, raw)
+        if not ok or not err then
+            return false, "Remote Lua syntax check failed."
+        end
+    end
+
+    return true, nil
+end
+
+local function installUpdate(raw, remoteVersion)
+    local path = getProgramPath()
+    local backup = path .. ".bak"
+
+    if fs.exists(path) then
+        local current = readText(path) or ""
+        writeText(backup, current)
+    end
+
+    writeText(path, raw)
+    systemMessage("Updated XenitChat to v" .. tostring(remoteVersion) .. ". Restart the script to use it.", "global")
+    systemMessage("Backup saved as " .. backup, "global")
+end
+
+local function checkForUpdate(auto, install, force)
+    if state.updateBusy then
+        if not auto then systemMessage("Update check already running.", "global") end
+        return
+    end
+
+    state.updateBusy = true
+
+    if not auto then
+        systemMessage("Checking GitHub for updates...", "global")
+    end
+
+    local raw, err = httpRead(APP.updateUrl)
+    if not raw then
+        if not auto then systemMessage("Update failed: " .. tostring(err), "global") end
+        state.updateBusy = false
+        return
+    end
+
+    local remoteVersion = parseRemoteVersion(raw)
+    if not remoteVersion then
+        if not auto then systemMessage("Update failed: could not read remote version.", "global") end
+        state.updateBusy = false
+        return
+    end
+
+    if remoteVersion <= APP.version and not force then
+        if not auto then systemMessage("Already up to date. Local v" .. APP.version .. ", GitHub v" .. remoteVersion .. ".", "global") end
+        state.updateBusy = false
+        return
+    end
+
+    local ok, reason = validateUpdate(raw)
+    if not ok then
+        systemMessage("Update blocked: " .. tostring(reason), "global")
+        state.updateBusy = false
+        return
+    end
+
+    if install then
+        installUpdate(raw, remoteVersion)
+    else
+        systemMessage("Update available: v" .. tostring(remoteVersion) .. " on GitHub. Type /update install.", "global")
+    end
+
+    state.updateBusy = false
+end
+
+local function openUpdateModal()
+    state.modal = "update"
+    state.modalInput = ""
+    state.modalData = nil
+end
+
 -- ============================================================
 -- Actions
 -- ============================================================
+
+local setError
 
 local function requestDiscovery()
     state.discover = {}
 
     for key, c in pairs(state.convos) do
-        if c.type == "public" and c.listed ~= false and c.private ~= true then
+        if c.type == "public" and c.listed ~= false and c.private ~= true and not state.leftGroups[key] then
             state.discover[key] = {
                 key = key,
                 title = c.title or key,
@@ -1076,21 +1359,23 @@ end
 local function createGroup(name, mode)
     if not name or name == "" then return end
 
-    name = name:gsub("%s+", "_")
+    local title = cleanGroupTitle(name)
+    if title == "" then return end
 
-    local key = name
+    local key = title:gsub("%s+", "_")
     local private = mode == "private" or mode == "unlisted"
     local listed = mode ~= "unlisted"
     local kind = private and "private_group" or "public"
 
-    ensureConvo(key, name, kind, private, listed, state.username)
+    state.leftGroups[key] = nil
+    ensureConvo(key, title, kind, private, listed, state.username)
     switchConvo(key)
 
-    systemMessage("Created group #" .. name, key)
+    systemMessage("Created group #" .. title, key)
 
     broadcast("channel_create", {
         key = key,
-        title = name,
+        title = title,
         private = private,
         listed = listed
     })
@@ -1099,13 +1384,96 @@ end
 local function joinGroup(name)
     if not name or name == "" then return end
 
-    name = name:gsub("%s+", "_")
-    ensureConvo(name, name, "public", false, true, "unknown")
-    switchConvo(name)
+    local title = cleanGroupTitle(name)
+    if title == "" then return end
+
+    local key = title:gsub("%s+", "_")
+    state.leftGroups[key] = nil
+    ensureConvo(key, title, "public", false, true, "unknown")
+    switchConvo(key)
 
     broadcast("join", {
-        key = name
+        key = key
     })
+end
+
+local function renameGroupLocal(key, newTitle, byName)
+    local c = state.convos[key]
+    if not canManageGroup(c) then return false end
+
+    newTitle = cleanGroupTitle(newTitle)
+    if newTitle == "" then return false end
+
+    local oldTitle = c.title or c.key
+    c.title = newTitle
+    c.renamedBy = byName or state.username or "unknown"
+    savePrefs()
+
+    if oldTitle ~= newTitle then
+        systemMessage(tostring(c.renamedBy) .. " renamed the group to #" .. newTitle .. ".", key)
+    end
+
+    return true
+end
+
+local function renameCurrentGroup(newTitle)
+    local c = state.convos[state.current]
+
+    if not canManageGroup(c) then
+        setError("Open a group first. Global and DMs cannot be renamed.")
+        return
+    end
+
+    if renameGroupLocal(c.key, newTitle, myName()) then
+        broadcast("channel_rename", {
+            key = c.key,
+            title = cleanGroupTitle(newTitle)
+        })
+    else
+        setError("Group name cannot be empty.")
+    end
+end
+
+local function leaveCurrentGroup()
+    local c = state.convos[state.current]
+
+    if not canManageGroup(c) then
+        setError("Open a group first. Global and DMs cannot be left.")
+        return
+    end
+
+    local key = c.key
+    local title = c.title or key
+    state.leftGroups[key] = true
+    state.convos[key] = nil
+    state.messages[key] = nil
+    state.discover[key] = nil
+    state.current = "global"
+    savePrefs()
+
+    broadcast("channel_leave", {
+        key = key
+    })
+
+    systemMessage("Left group #" .. title .. ".", "global")
+end
+
+local function openGroupSettings()
+    state.modal = "group_settings"
+    state.modalInput = ""
+    state.modalData = nil
+end
+
+local function openRenameGroup()
+    local c = state.convos[state.current]
+    if not canManageGroup(c) then
+        setError("Open a group first. Global and DMs cannot be renamed.")
+        return
+    end
+
+    state.modal = "group_rename"
+    state.modalInput = c.title or c.key
+    state.modalData = nil
 end
 
 local function sendReadReceipt(publicId)
@@ -1121,22 +1489,91 @@ local function openPM(publicId, user)
         user = state.users[publicId]
     end
 
-    local title = "Unknown"
-
-    if user then
-        title = displayName(user.username, publicId, user.profile)
-    end
-
+    local title = peerDisplayName(publicId, user and user.username or "Unknown")
     local key = pmKeyFor(publicId, title)
     ensureConvo(key, title, "pm", true, false, title, publicId)
     switchConvo(key)
     sendReadReceipt(publicId)
 end
 
+local sendFriendRequest
+local logout
+
+local function handleSlashCommand(body)
+    if body:sub(1, 1) ~= "/" then return false end
+
+    local command, rest = body:match("^/(%S+)%s*(.*)$")
+    command = command and command:lower() or ""
+    rest = rest or ""
+
+    if command == "help" or command == "?" then
+        state.modal = "help"
+    elseif command == "menu" then
+        openMainMenu()
+    elseif command == "chats" then
+        openChatsModal()
+    elseif command == "people" or command == "friends" then
+        state.modal = "people"
+    elseif command == "inbox" then
+        state.modal = "friend_inbox"
+    elseif command == "blocked" then
+        state.modal = "blocked"
+    elseif command == "theme" then
+        state.modal = "theme"
+    elseif command == "discover" or command == "d" then
+        requestDiscovery()
+    elseif command == "update" then
+        local mode = rest:lower()
+        if mode == "install" or mode == "now" then
+            checkForUpdate(false, true, false)
+        elseif mode == "force" then
+            checkForUpdate(false, true, true)
+        else
+            checkForUpdate(false, false, false)
+        end
+    elseif command == "join" then
+        if rest ~= "" then joinGroup(rest) else systemMessage("Usage: /join group_name") end
+    elseif command == "new" or command == "group" then
+        if rest ~= "" then createGroup(rest, "public") else systemMessage("Usage: /new group_name") end
+    elseif command == "rename" then
+        if rest ~= "" then renameCurrentGroup(rest) else systemMessage("Usage: /rename new group name") end
+    elseif command == "leave" then
+        leaveCurrentGroup()
+    elseif command == "info" or command == "settings" then
+        openGroupSettings()
+    elseif command == "pm" or command == "msg" then
+        local id, user = resolveUser(rest)
+        if id then openPM(id, user) else systemMessage("User not found online.") end
+    elseif command == "add" or command == "friend" then
+        local id, user = resolveUser(rest)
+        if id and user then sendFriendRequest(id, user) else systemMessage("User not found online.") end
+    elseif command == "status" then
+        state.profile.status = rest ~= "" and trim(rest, 40) or "Available"
+        savePrefs()
+        broadcast("hello", {})
+        systemMessage("Status updated.")
+    elseif command == "name" then
+        state.profile.display = rest ~= "" and trim(rest, 24) or state.username
+        savePrefs()
+        broadcast("hello", {})
+        systemMessage("Display name updated.")
+    elseif command == "clear" then
+        clearCurrentChat()
+    elseif command == "logout" then
+        logout()
+    else
+        systemMessage("Unknown command. Try /help.")
+    end
+
+    state.input = ""
+    return true
+end
+
 local function sendChat()
     local body = clampMessage(state.input)
 
     if body == "" then return end
+    if handleSlashCommand(body) then return end
 
     local c = state.convos[state.current] or {}
     local msgId = randomToken(10)
@@ -1147,15 +1584,22 @@ local function sendChat()
     })
 
     if c.type == "pm" then
-        broadcast("pm", {
-            toPublicId = c.peerId,
-            toName = c.title,
-            body = body,
-            msgId = msgId
-        })
+        if not c.peerId then
+            systemMessage("Cannot send: this DM has no valid user ID.")
+        else
+            broadcast("pm", {
+                toPublicId = c.peerId,
+                toName = c.title,
+                body = body,
+                msgId = msgId
+            })
+        end
     else
         broadcast("chat", {
             key = state.current,
+            title = c.title or state.current,
+            private = c.private or false,
+            listed = c.listed ~= false,
             body = body,
             msgId = msgId
         })
@@ -1164,30 +1608,130 @@ local function sendChat()
     state.input = ""
 end
 
-local function friendUser(publicId, user)
-    if not publicId or not user then return end
+local function cleanRequests(publicId)
+    if not publicId then return end
+
+    if state.friendRequests then
+        if state.friendRequests.inbox then state.friendRequests.inbox[publicId] = nil end
+        if state.friendRequests.sent then state.friendRequests.sent[publicId] = nil end
+    end
+end
+
+local function requestRecord(publicId, user, status)
+    user = user or state.users[publicId] or {}
+
+    return {
+        username = user.username or "unknown",
+        profile = user.profile or {},
+        time = os.time(),
+        status = status or "pending"
+    }
+end
+
+local function addFriendDirect(publicId, user)
+    if not publicId then return end
+
+    user = user or state.users[publicId] or {}
 
     state.friends[publicId] = {
-        username = user.username,
+        username = user.username or "unknown",
         profile = user.profile or {},
         added = os.time()
     }
 
+    cleanRequests(publicId)
     savePrefs()
+end
+
+function sendFriendRequest(publicId, user)
+    if not publicId or not user then return end
+
+    if state.blocked[publicId] then
+        setError("Unblock this user before adding them.")
+        return
+    end
+
+    if state.friends[publicId] then
+        setError("Already friends.")
+        return
+    end
+
+    if state.friendRequests.inbox[publicId] then
+        setError("They already sent you a request. Open Inbox to accept.")
+        return
+    end
+
+    state.friendRequests.sent[publicId] = requestRecord(publicId, user, "sent")
+    savePrefs()
+
+    broadcast("friend_request", {
+        toPublicId = publicId
+    })
+
+    systemMessage("Friend request sent to " .. displayName(user.username, publicId, user.profile) .. ".")
+end
+
+local function acceptFriendRequest(publicId, user)
+    if not publicId then return end
+
+    addFriendDirect(publicId, user)
+
+    broadcast("friend_accept", {
+        toPublicId = publicId
+    })
+
+    systemMessage("Friend request accepted.")
+end
+
+local function declineFriendRequest(publicId)
+    if not publicId then return end
+
+    cleanRequests(publicId)
+    savePrefs()
+
+    broadcast("friend_decline", {
+        toPublicId = publicId
+    })
+
+    systemMessage("Friend request declined.")
+end
+
+local function cancelFriendRequest(publicId)
+    if not publicId then return end
+
+    if state.friendRequests and state.friendRequests.sent then
+        state.friendRequests.sent[publicId] = nil
+    end
+
+    savePrefs()
+
+    broadcast("friend_cancel", {
+        toPublicId = publicId
+    })
+
+    systemMessage("Friend request cancelled.")
 end
 
 local function unfriendUser(publicId)
     if not publicId then return end
 
     state.friends[publicId] = nil
+    cleanRequests(publicId)
     savePrefs()
+
+    broadcast("unfriend", {
+        toPublicId = publicId
+    })
 end
 
 local function blockUser(publicId)
     if not publicId then return end
 
+    local user = state.users[publicId] or {}
     state.blocked[publicId] = true
+    state.blockedInfo[publicId] = requestRecord(publicId, user, "blocked")
     state.friends[publicId] = nil
+    cleanRequests(publicId)
     savePrefs()
 end
 
@@ -1195,10 +1739,11 @@ local function unblockUser(publicId)
     if not publicId then return end
 
     state.blocked[publicId] = nil
+    state.blockedInfo[publicId] = nil
     savePrefs()
 end
 
-local function setError(message)
+function setError(message)
     state.modal = "error"
     state.modalInput = tostring(message or "Error")
 end
@@ -1223,6 +1768,11 @@ local function finishLogin(username, account, remembered)
     broadcast("hello", {
         current = state.current
     })
+
+    if not state.updateChecked then
+        state.updateChecked = true
+        checkForUpdate(true, true, false)
+    end
 end
 
 local function login()
@@ -1311,7 +1861,7 @@ local function tryRememberLogin()
     return true
 end
 
-local function logout()
+function logout()
     state.username = nil
     state.publicId = nil
     state.screen = "login"
@@ -1340,94 +1890,65 @@ local function drawLogin(registerMode)
 
     fill(1, 1, w, h, T().bg)
 
-    if isPocket() then
-        center(1, APP.name, T().accent, T().bg)
-        center(2, APP.slogan, T().muted, T().bg)
-
-        local y = 4
-
-        fill(1, y, w, 10, T().panel)
-
-        text(2, y + 1, registerMode and "Create account" or "Welcome back", T().text, T().panel)
-
-        text(2, y + 3, "User", T().muted, T().panel)
-        fill(8, y + 3, w - 8, 1, state.focus == "username" and colors.white or T().muted)
-        text(9, y + 3, trim(state.input, w - 10), colors.black, state.focus == "username" and colors.white or T().muted)
-
-        text(2, y + 5, "Pass", T().muted, T().panel)
-        fill(8, y + 5, w - 8, 1, state.focus == "password" and colors.white or T().muted)
-        text(9, y + 5, trim(string.rep("*", #state.password), w - 10), colors.black, state.focus == "password" and colors.white or T().muted)
-
-        local half = math.floor((w - 5) / 2)
-
-        if registerMode then
-            addButton("register", 2, y + 7, half, "Create", colors.black, T().good, register)
-            addButton("back", 3 + half, y + 7, half, "Back", colors.white, T().danger, function()
-                state.screen = "login"
-                state.input = ""
-                state.password = ""
-                state.modal = nil
-            end)
-        else
-            addButton("login", 2, y + 7, half, "Login", colors.black, T().good, login)
-            addButton("new", 3 + half, y + 7, half, "New", colors.black, T().accent, function()
-                state.screen = "register"
-                state.input = ""
-                state.password = ""
-                state.modal = nil
-            end)
-        end
-
-        addButton("remember", 2, y + 8, w - 2, state.remember and "Remember: ON" or "Remember: OFF", colors.black, state.remember and T().accent or T().muted, function()
-            state.remember = not state.remember
-            savePrefs()
-        end)
-
-        if state.modal == "error" then
-            text(1, h - 1, trim(state.modalInput, w), T().danger, T().bg)
-        else
-            text(1, h - 1, "TAB field | ENTER go", T().muted, T().bg)
-        end
-
-        return
+    local compact = w < 38 or h < 16
+    local titleY = compact and 1 or 2
+    center(titleY, APP.name, T().accent, T().bg)
+    if not compact and h >= 14 then
+        center(titleY + 1, APP.slogan, T().muted, T().bg)
     end
 
-    center(2, APP.name, T().accent, T().bg)
-    center(3, APP.slogan, T().muted, T().bg)
+    local panelW = math.min(compact and w or 42, math.max(1, w - (compact and 0 or 4)))
+    local panelH = compact and math.min(10, h - 2) or math.min(12, h - 5)
+    if panelH < 8 then panelH = math.min(h, 8) end
 
-    local panelW = math.min(42, w - 4)
-    local panelH = 12
     local panelX = math.floor((w - panelW) / 2) + 1
-    local panelY = math.max(5, math.floor((h - panelH) / 2) + 1)
+    local panelY
+    if compact then
+        panelY = math.max(2, math.floor((h - panelH) / 2) + 1)
+    else
+        panelY = math.max(5, math.floor((h - panelH) / 2) + 1)
+    end
+
+    if panelY + panelH - 1 > h then panelY = math.max(1, h - panelH + 1) end
 
     fill(panelX, panelY, panelW, panelH, T().panel)
 
-    text(panelX + 2, panelY + 1, registerMode and "Create account" or "Login", T().text, T().panel)
+    local labelW = compact and 5 or 10
+    local inputX = panelX + labelW + 2
+    local inputW = math.max(4, panelW - labelW - 3)
 
-    text(panelX + 2, panelY + 3, "Username", T().muted, T().panel)
-    fill(panelX + 12, panelY + 3, panelW - 14, 1, state.focus == "username" and colors.white or T().muted)
-    text(panelX + 13, panelY + 3, trim(state.input, panelW - 16), colors.black, state.focus == "username" and colors.white or T().muted)
+    text(panelX + 1, panelY + 1, registerMode and "Create account" or "Welcome back", T().text, T().panel)
 
-    text(panelX + 2, panelY + 5, "Password", T().muted, T().panel)
-    fill(panelX + 12, panelY + 5, panelW - 14, 1, state.focus == "password" and colors.white or T().muted)
-    text(panelX + 13, panelY + 5, trim(string.rep("*", #state.password), panelW - 16), colors.black, state.focus == "password" and colors.white or T().muted)
+    text(panelX + 1, panelY + 3, compact and "User" or "Username", T().muted, T().panel)
+    fill(inputX, panelY + 3, inputW, 1, state.focus == "username" and colors.white or T().muted)
+    text(inputX + 1, panelY + 3, trim(state.input, math.max(1, inputW - 2)), colors.black, state.focus == "username" and colors.white or T().muted)
 
-    local btnW = 14
-    local gap = 2
-    local total = btnW * 2 + gap
-    local bx = panelX + math.floor((panelW - total) / 2)
+    text(panelX + 1, panelY + 5, compact and "Pass" or "Password", T().muted, T().panel)
+    fill(inputX, panelY + 5, inputW, 1, state.focus == "password" and colors.white or T().muted)
+    text(inputX + 1, panelY + 5, trim(string.rep("*", #state.password), math.max(1, inputW - 2)), colors.black, state.focus == "password" and colors.white or T().muted)
+
+    local buttonY = panelY + panelH - 3
+    local rememberY = panelY + panelH - 2
+    if panelH <= 9 then
+        buttonY = panelY + 7
+        rememberY = panelY + 8
+    end
+
+    local gap = panelW < 30 and 1 or 2
+    local half = math.floor((panelW - 2 - gap) / 2)
+    local bx = panelX + 1
 
     if registerMode then
-        addButton("register", bx, panelY + 8, btnW, "Register", colors.black, T().good, register)
-        addButton("back", bx + btnW + gap, panelY + 8, btnW, "Back", colors.white, T().danger, function()
+        addButton("register", bx, buttonY, half, compact and "Create" or "Register", colors.black, T().good, register)
+        addButton("back", bx + half + gap, buttonY, panelW - half - gap - 2, "Back", colors.white, T().danger, function()
             state.screen = "login"
             state.input = ""
             state.password = ""
             state.modal = nil
         end)
     else
-        addButton("login", bx, panelY + 8, btnW, "Login", colors.black, T().good, login)
-        addButton("new", bx + btnW + gap, panelY + 8, btnW, "Register", colors.black, T().accent, function()
+        addButton("login", bx, buttonY, half, "Login", colors.black, T().good, login)
+        addButton("new", bx + half + gap, buttonY, panelW - half - gap - 2, compact and "New" or "Register", colors.black, T().accent, function()
             state.screen = "register"
             state.input = ""
             state.password = ""
@@ -1435,15 +1956,17 @@ local function drawLogin(registerMode)
         end)
     end
 
-    addButton("remember", bx, panelY + 10, total, state.remember and "Remember me: ON" or "Remember me: OFF", colors.black, state.remember and T().accent or T().muted, function()
-        state.remember = not state.remember
-        savePrefs()
-    end)
+    if rememberY <= panelY + panelH - 1 then
+        addButton("remember", panelX + 1, rememberY, panelW - 2, state.remember and "Remember: ON" or "Remember: OFF", colors.black, state.remember and T().accent or T().muted, function()
+            state.remember = not state.remember
+            savePrefs()
+        end)
+    end
 
     if state.modal == "error" then
-        center(h - 2, trim(state.modalInput, w - 2), T().danger, T().bg)
+        text(1, h, trim(state.modalInput, w), T().danger, T().bg)
     else
-        center(h - 1, "TAB field | ENTER continue | click buttons", T().muted, T().bg)
+        text(1, h, trim("TAB field | ENTER continue", w), T().muted, T().bg)
     end
 end
 
@@ -1452,16 +1975,19 @@ end
 -- ============================================================
 
 local function modalBox(width, height)
-    local mw
-    local mh
+    local marginX = w <= 30 and 0 or 2
+    local marginY = h <= 14 and 0 or 1
+    local maxW = math.max(1, w - marginX * 2)
+    local maxH = math.max(1, h - marginY * 2)
 
-    if isPocket() then
-        mw = w
-        mh = math.min(height, h - 2)
-    else
-        mw = math.min(width, w - 4)
-        mh = math.min(height, h - 4)
-    end
+    local wantedW = tonumber(width) or maxW
+    local wantedH = tonumber(height) or maxH
+
+    local mw = math.min(math.max(18, wantedW), maxW)
+    local mh = math.min(math.max(5, wantedH), maxH)
+
+    if w < 18 then mw = maxW end
+    if h < 8 then mh = maxH end
 
     local mx = math.floor((w - mw) / 2) + 1
     local my = math.floor((h - mh) / 2) + 1
@@ -1640,9 +2166,17 @@ local function drawPeopleModal()
         for i = 1, math.min(#list, maxRows) do
             local u = list[i]
             local name = displayName(u.username, u.publicId, u.profile)
-            local friend = state.friends[u.publicId] and "*" or " "
+            local rel = " "
+            if state.friends[u.publicId] then
+                rel = "*"
+            elseif state.friendRequests.inbox[u.publicId] then
+                rel = "!"
+            elseif state.friendRequests.sent[u.publicId] then
+                rel = "?"
+            end
+
             local online = os.clock() - (u.lastSeenClock or 0) <= APP.onlineTimeout and "o" or "-"
-            local label = online .. friend .. " " .. name .. " #" .. shortId(u.publicId)
+            local label = online .. rel .. " " .. name .. " #" .. shortId(u.publicId)
 
             addButton("person_" .. tostring(i), mx + 1, my + 2 + i, mw - 2, trim(label, mw - 2), colors.black, colors.white, function()
                 state.modal = "user_info"
@@ -1654,13 +2188,118 @@ local function drawPeopleModal()
         end
     end
 
-    addButton("people_add", mx + 1, my + mh - 1, 10, "Search", colors.black, T().accent, function()
+    addButton("people_add", mx + 1, my + mh - 1, 8, "Search", colors.black, T().accent, function()
         state.modal = "friend_search"
         state.modalInput = ""
     end)
 
-    addButton("people_close", mx + mw - 8, my + mh - 1, 8, "Close", colors.white, T().danger, function()
+    addButton("people_inbox", mx + 10, my + mh - 1, 8, "Inbox", colors.black, T().warn, function()
+        state.modal = "friend_inbox"
+    end)
+
+    addButton("people_blocked", mx + 19, my + mh - 1, 8, "Blocked", colors.white, T().danger, function()
+        state.modal = "blocked"
+    end)
+
+    addButton("people_close", mx + mw - 8, my + mh - 1, 8, "Close", colors.white, colors.gray, function()
         state.modal = nil
+    end)
+end
+
+
+local function drawFriendInboxModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 52, isPocket() and 12 or 14)
+
+    text(mx + 1, my + 1, "Friend inbox", colors.black, colors.lightGray)
+    text(mx + 1, my + 2, "! incoming | ? sent", colors.gray, colors.lightGray)
+
+    local rows = {}
+
+    for publicId, r in pairs(state.friendRequests.inbox or {}) do
+        table.insert(rows, {
+            publicId = publicId,
+            record = r,
+            dir = "in"
+        })
+    end
+
+    for publicId, r in pairs(state.friendRequests.sent or {}) do
+        table.insert(rows, {
+            publicId = publicId,
+            record = r,
+            dir = "out"
+        })
+    end
+
+    table.sort(rows, function(a, b)
+        return (a.record.time or 0) > (b.record.time or 0)
+    end)
+
+    local maxRows = mh - 6
+
+    if #rows == 0 then
+        text(mx + 1, my + 4, "No pending friend requests.", colors.gray, colors.lightGray)
+    else
+        for i = 1, math.min(#rows, maxRows) do
+            local r = rows[i]
+            local user = state.users[r.publicId] or r.record or {}
+            local name = displayName(user.username or r.record.username, r.publicId, user.profile or r.record.profile)
+            local label = (r.dir == "in" and "! " or "? ") .. name .. " #" .. shortId(r.publicId)
+
+            addButton("fr_row_" .. tostring(i), mx + 1, my + 3 + i, mw - 2, trim(label, mw - 2), colors.black, colors.white, function()
+                state.modal = "user_info"
+                state.modalData = {
+                    publicId = r.publicId,
+                    user = state.users[r.publicId] or r.record
+                }
+            end)
+        end
+    end
+
+    addButton("fr_close", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, function()
+        state.modal = "people"
+    end)
+end
+
+local function drawBlockedModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 52, isPocket() and 12 or 14)
+
+    text(mx + 1, my + 1, "Blocked users", colors.black, colors.lightGray)
+    text(mx + 1, my + 2, "Click a user to unblock.", colors.gray, colors.lightGray)
+
+    local rows = {}
+
+    for publicId, _ in pairs(state.blocked or {}) do
+        table.insert(rows, {
+            publicId = publicId,
+            record = state.blockedInfo[publicId] or state.users[publicId] or { username = "unknown" }
+        })
+    end
+
+    table.sort(rows, function(a, b)
+        return tostring((a.record and a.record.username) or a.publicId) < tostring((b.record and b.record.username) or b.publicId)
+    end)
+
+    local maxRows = mh - 5
+
+    if #rows == 0 then
+        text(mx + 1, my + 4, "Nobody is blocked.", colors.gray, colors.lightGray)
+    else
+        for i = 1, math.min(#rows, maxRows) do
+            local r = rows[i]
+            local rec = r.record or {}
+            local name = displayName(rec.username or "unknown", r.publicId, rec.profile or {})
+            local label = name .. " #" .. shortId(r.publicId) .. "  [unblock]"
+
+            addButton("blk_row_" .. tostring(i), mx + 1, my + 2 + i, mw - 2, trim(label, mw - 2), colors.white, T().danger, function()
+                unblockUser(r.publicId)
+                state.modal = "blocked"
+            end)
+        end
+    end
+
+    addButton("blk_close", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, function()
+        state.modal = "people"
     end)
 end
 
@@ -1676,7 +2315,7 @@ local function drawFriendSearchModal()
         local id, user = resolveUser(state.modalInput)
 
         if id and user then
-            friendUser(id, user)
+            sendFriendRequest(id, user)
             state.modal = "people"
             state.modalInput = ""
         else
@@ -1704,31 +2343,51 @@ local function drawUserInfoModal()
     text(mx + 1, my + 4, trim("Status: " .. status, mw - 2), colors.gray, colors.lightGray)
     text(mx + 1, my + 5, trim("ID: " .. shortId(id), mw - 2), colors.gray, colors.lightGray)
 
-    local friendLabel = state.friends[id] and "Unfriend" or "Friend"
-    local blockLabel = state.blocked[id] and "Unblock" or "Block"
+    local friendLabel = "Request"
+
+    if state.friends[id] then
+        friendLabel = "Unfriend"
+    elseif state.friendRequests.inbox[id] then
+        friendLabel = "Accept"
+    elseif state.friendRequests.sent[id] then
+        friendLabel = "Cancel"
+    end
+
+    local blockLabel = state.friendRequests.inbox[id] and "Decline" or (state.blocked[id] and "Unblock" or "Block")
 
     local by = my + mh - 2
 
-    addButton("ui_pm", mx + 1, by, 8, "PM", colors.black, T().accent, function()
+    addButton("ui_pm", mx + 1, by, 7, "PM", colors.black, T().accent, function()
         openPM(id, user)
         state.modal = nil
     end)
 
-    addButton("ui_friend", mx + 10, by, 10, friendLabel, colors.black, T().good, function()
+    addButton("ui_friend", mx + 9, by, 10, friendLabel, colors.black, T().good, function()
         if state.friends[id] then
             unfriendUser(id)
+        elseif state.friendRequests.inbox[id] then
+            acceptFriendRequest(id, user)
+            state.modal = "people"
+        elseif state.friendRequests.sent[id] then
+            cancelFriendRequest(id)
+            state.modal = "people"
         else
-            friendUser(id, user)
+            sendFriendRequest(id, user)
+            state.modal = "people"
         end
     end)
 
-    addButton("ui_block", mx + 21, by, 8, blockLabel, colors.white, T().danger, function()
-        if state.blocked[id] then
+    addButton("ui_block", mx + 20, by, 8, blockLabel, colors.white, T().danger, function()
+        if state.friendRequests.inbox[id] then
+            declineFriendRequest(id)
+            state.modal = "friend_inbox"
+        elseif state.blocked[id] then
             unblockUser(id)
+            state.modal = "blocked"
         else
             blockUser(id)
+            state.modal = "blocked"
         end
-        state.modal = nil
     end)
 
     addButton("ui_close", mx + mw - 8, by, 8, "Close", colors.white, colors.gray, function()
@@ -1777,12 +2436,203 @@ local function drawProfileModal()
     end)
 end
 
+
+local function drawGroupSettingsModal()
+    local c = state.convos[state.current]
+    local isGroup = canManageGroup(c)
+    local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 12 or 13)
+
+    text(mx + 1, my + 1, "Chat settings", colors.black, colors.lightGray)
+
+    if not c then
+        text(mx + 1, my + 3, "No chat selected.", colors.gray, colors.lightGray)
+    elseif c.type == "pm" then
+        text(mx + 1, my + 3, trim(chatLabel(c, false), mw - 2), colors.black, colors.lightGray)
+        text(mx + 1, my + 4, "This is a direct message.", colors.gray, colors.lightGray)
+        text(mx + 1, my + 5, trim("ID: " .. shortId(c.peerId), mw - 2), colors.gray, colors.lightGray)
+    elseif c.key == "global" then
+        text(mx + 1, my + 3, "#global", colors.black, colors.lightGray)
+        text(mx + 1, my + 4, "Global cannot be renamed or left.", colors.gray, colors.lightGray)
+    else
+        text(mx + 1, my + 3, trim("Group: #" .. tostring(c.title or c.key), mw - 2), colors.black, colors.lightGray)
+        text(mx + 1, my + 4, trim("Key: " .. tostring(c.key), mw - 2), colors.gray, colors.lightGray)
+        text(mx + 1, my + 5, trim("Owner: " .. tostring(c.owner or "unknown"), mw - 2), colors.gray, colors.lightGray)
+        text(mx + 1, my + 6, c.private and "Visibility: private/unlisted" or "Visibility: public", colors.gray, colors.lightGray)
+        text(mx + 1, my + 7, "Heads up: group rename is shared.", colors.red, colors.lightGray)
+    end
+
+    local by = my + mh - 1
+
+    if isGroup then
+        addButton("grp_rename", mx + 1, by, 9, "Rename", colors.black, T().good, openRenameGroup)
+        addButton("grp_leave", mx + 11, by, 8, "Leave", colors.white, T().danger, function()
+            leaveCurrentGroup()
+            state.modal = nil
+        end)
+    end
+
+    addButton("grp_back", mx + mw - 8, by, 8, "Back", colors.white, colors.gray, openMainMenu)
+end
+
+local function drawGroupRenameModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 46, isPocket() and 8 or 8)
+
+    text(mx + 1, my + 1, "Rename group", colors.black, colors.lightGray)
+    text(mx + 1, my + 2, "Everyone may receive this new name.", colors.gray, colors.lightGray)
+
+    fill(mx + 1, my + 4, mw - 2, 1, colors.white)
+    text(mx + 2, my + 4, trim(state.modalInput, mw - 4), colors.black, colors.white)
+
+    addButton("rename_ok", mx + 1, my + mh - 1, 8, "Save", colors.black, T().good, function()
+        renameCurrentGroup(state.modalInput)
+        state.modal = nil
+        state.modalInput = ""
+    end)
+
+    addButton("rename_cancel", mx + mw - 8, my + mh - 1, 8, "Cancel", colors.white, colors.gray, openGroupSettings)
+end
+
+local function drawMainMenuModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 44, isPocket() and 13 or 14)
+
+    text(mx + 1, my + 1, "Menu", colors.black, colors.lightGray)
+    text(mx + 1, my + 2, trim(currentChatTitle() .. "  |  /help for commands", mw - 2), colors.gray, colors.lightGray)
+
+    local items = {
+        { "Chats", openChatsModal, T().good, colors.black },
+        { "People", function() state.modal = "people" end, T().warn, colors.black },
+        { "Friend Inbox", function() state.modal = "friend_inbox" end, T().accent, colors.black },
+        { "Discover Groups", requestDiscovery, T().accent, colors.black },
+        { "New Group", function() state.modal = "create" state.modalInput = "" state.modalMode = "public" end, T().good, colors.black },
+        { "Chat Settings", openGroupSettings, colors.lightGray, colors.black },
+        { "Direct Message", function() state.modal = "pm" state.modalInput = "" end, colors.lightGray, colors.black },
+        { "Auto Update", openUpdateModal, colors.lightGray, colors.black },
+        { "Profile", function() state.modal = "profile" state.modalMode = "profile" state.modalInput = state.profile.display or state.username or "" end, colors.lightGray, colors.black }
+    }
+
+    local rowY = my + 3
+    local maxRows = mh - 5
+
+    for i = 1, math.min(#items, maxRows) do
+        local item = items[i]
+        addButton("menu_" .. tostring(i), mx + 1, rowY + i - 1, mw - 2, item[1], item[4], item[3], item[2])
+    end
+
+    local fy = my + mh - 1
+    addButton("menu_theme", mx + 1, fy, 7, "Theme", colors.black, colors.lightGray, function()
+        state.modal = "theme"
+    end)
+    addButton("menu_help", mx + 9, fy, 6, "Help", colors.black, colors.lightGray, function()
+        state.modal = "help"
+    end)
+    addButton("menu_logout", mx + mw - 8, fy, 8, "Logout", colors.white, T().danger, logout)
+end
+
+local function drawChatsModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 13 or 14)
+
+    text(mx + 1, my + 1, "Chats", colors.black, colors.lightGray)
+    text(mx + 1, my + 2, "Select a chat. New messages show a count.", colors.gray, colors.lightGray)
+
+    local list = getConvoList()
+    local maxRows = mh - 6
+
+    if #list == 0 then
+        text(mx + 1, my + 4, "No chats yet.", colors.gray, colors.lightGray)
+    else
+        for i = 1, math.min(#list, maxRows) do
+            local c = list[i]
+            local label = chatLabel(c, true)
+            if (c.unread or 0) > 0 then
+                label = label .. "  (" .. tostring(c.unread) .. " new)"
+            end
+            if c.key == state.current then
+                label = "> " .. label
+            else
+                label = "  " .. label
+            end
+
+            addButton("chat_row_" .. tostring(i), mx + 1, my + 2 + i, mw - 2, trim(label, mw - 2), colors.black, c.key == state.current and T().accent or colors.white, function()
+                switchConvo(c.key)
+                state.modal = nil
+            end)
+        end
+    end
+
+    addButton("chats_new", mx + 1, my + mh - 1, 9, "+ Group", colors.black, T().good, function()
+        state.modal = "create"
+        state.modalInput = ""
+        state.modalMode = "public"
+    end)
+
+    addButton("chats_clear", mx + 11, my + mh - 1, 8, "Clear", colors.white, colors.gray, function()
+        clearCurrentChat()
+        state.modal = nil
+    end)
+
+    addButton("chats_close", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
+end
+
+local function drawHelpModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 54, isPocket() and 13 or 15)
+
+    text(mx + 1, my + 1, "Help / shortcuts", colors.black, colors.lightGray)
+
+    local lines = {
+        "ENTER send   TAB next chat   ESC close",
+        "/menu  /chats  /people  /inbox",
+        "/pm name-or-id     /friend name-or-id",
+        "/join group        /new group",
+        "/rename name       /leave       /info",
+        "/status text       /name display-name",
+        "/discover          /theme",
+        "/update            /update install",
+        "/clear             /logout",
+        "People marks: * friend, ! request, ? sent",
+        "Groups: rename is shared; leave stops auto rejoin.",
+        "Pocket: use Chats + Menu; avoid tiny buttons."
+    }
+
+    local maxRows = mh - 4
+    for i = 1, math.min(#lines, maxRows) do
+        text(mx + 1, my + 1 + i, trim(lines[i], mw - 2), colors.black, colors.lightGray)
+    end
+
+    addButton("help_close", mx + mw - 8, my + mh - 1, 8, "Close", colors.white, colors.gray, function()
+        state.modal = nil
+    end)
+end
+
+
+local function drawUpdateModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 10 or 11)
+
+    text(mx + 1, my + 1, "Auto Update", colors.black, colors.lightGray)
+    text(mx + 1, my + 3, trim("Source: GitHub benchware/Xenit-Chat", mw - 2), colors.black, colors.lightGray)
+    text(mx + 1, my + 4, trim("Local version: v" .. tostring(APP.version), mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 5, trim("Startup checks install newer versions automatically.", mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 6, trim("Manual: /update or /update install", mw - 2), colors.gray, colors.lightGray)
+
+    local fy = my + mh - 1
+    addButton("upd_check", mx + 1, fy, 9, "Check", colors.black, T().accent, function()
+        state.modal = nil
+        checkForUpdate(false, false, false)
+    end)
+
+    addButton("upd_install", mx + 11, fy, 10, "Install", colors.black, T().good, function()
+        state.modal = nil
+        checkForUpdate(false, true, false)
+    end)
+
+    addButton("upd_close", mx + mw - 8, fy, 8, "Back", colors.white, colors.gray, openMainMenu)
+end
+
 local function drawThemeModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 36, 7)
 
     text(mx + 1, my + 1, "Choose theme", colors.black, colors.lightGray)
 
-    local names = { "dark", "ocean", "clean" }
+    local names = { "midnight", "dark", "ocean", "clean" }
 
     for i, key in ipairs(names) do
         local th = THEMES[key]
@@ -1812,7 +2662,17 @@ local function drawErrorModal()
 end
 
 local function drawModal()
-    if state.modal == "create" then
+    if state.modal == "main_menu" then
+        drawMainMenuModal()
+    elseif state.modal == "chats" then
+        drawChatsModal()
+    elseif state.modal == "help" then
+        drawHelpModal()
+    elseif state.modal == "group_settings" then
+        drawGroupSettingsModal()
+    elseif state.modal == "group_rename" then
+        drawGroupRenameModal()
+    elseif state.modal == "create" then
         drawCreateModal()
     elseif state.modal == "discover" then
         drawDiscoverModal()
@@ -1822,12 +2682,18 @@ local function drawModal()
         drawPeopleModal()
     elseif state.modal == "friend_search" then
         drawFriendSearchModal()
+    elseif state.modal == "friend_inbox" then
+        drawFriendInboxModal()
+    elseif state.modal == "blocked" then
+        drawBlockedModal()
     elseif state.modal == "user_info" then
         drawUserInfoModal()
     elseif state.modal == "profile" then
         drawProfileModal()
     elseif state.modal == "theme" then
         drawThemeModal()
+    elseif state.modal == "update" then
+        drawUpdateModal()
     elseif state.modal == "error" then
         drawErrorModal()
     end
@@ -1840,14 +2706,27 @@ end
 local function drawTopBar()
     fill(1, 1, w, 1, T().top)
 
-    if isPocket() then
-        text(1, 1, APP.name, colors.white, T().top)
+    local unread = totalUnread()
+    local pending = pendingFriendCount()
+    local title = currentChatTitle()
+    local compact = w < 50
+
+    if compact then
+        local left = trim(title, math.max(1, w - 10))
         local right = tostring(onlineCount()) .. " on"
+        if pending > 0 then right = "!" .. tostring(pending) end
+        if unread > 0 and pending == 0 then right = tostring(unread) .. " new" end
+
+        text(1, 1, left, colors.white, T().top)
         text(math.max(1, w - #right + 1), 1, right, colors.yellow, T().top)
     else
-        text(2, 1, APP.name, colors.white, T().top)
-
+        local left = APP.name .. "  " .. title
         local right = "@" .. myName() .. " | " .. tostring(onlineCount()) .. " online"
+
+        if unread > 0 then right = tostring(unread) .. " unread | " .. right end
+        if pending > 0 then right = tostring(pending) .. " requests | " .. right end
+
+        text(2, 1, trim(left, math.max(1, w - #right - 3)), colors.white, T().top)
         text(math.max(1, w - #right), 1, right, colors.yellow, T().top)
     end
 end
@@ -1858,33 +2737,15 @@ local function drawConvoList()
     if lw == 0 then
         fill(1, 2, w, 1, T().panel)
 
-        local c = state.convos[state.current] or {}
-        local label = c.title or state.current
+        local title = currentChatTitle()
+        local menuW = w < 32 and 4 or 6
+        local chatsW = w < 32 and 5 or 7
+        local reserved = menuW + chatsW + 2
 
-        if (c.unread or 0) > 0 then
-            label = "*" .. label
-        end
+        text(1, 2, trim(title, math.max(1, w - reserved)), colors.black, T().accent)
 
-        text(1, 2, trim(label, w - 16), colors.black, T().accent)
-
-        addButton("mobile_new", w - 15, 2, 2, "+", colors.black, T().good, function()
-            state.modal = "create"
-            state.modalInput = ""
-            state.modalMode = "public"
-        end)
-
-        addButton("mobile_d", w - 12, 2, 2, "D", colors.black, T().accent, requestDiscovery)
-
-        addButton("mobile_pm", w - 9, 2, 2, "P", colors.black, T().warn, function()
-            state.modal = "pm"
-            state.modalInput = ""
-        end)
-
-        addButton("mobile_people", w - 6, 2, 2, "U", colors.black, T().good, function()
-            state.modal = "people"
-        end)
-
-        addButton("mobile_next", w - 3, 2, 3, ">>", colors.white, colors.gray, nextConvo)
+        addButton("mobile_chats", math.max(1, w - reserved + 1), 2, chatsW, w < 32 and "Chat" or "Chats", colors.black, T().good, openChatsModal)
+        addButton("mobile_menu", math.max(1, w - menuW + 1), 2, menuW, w < 32 and "Menu" or "Menu", colors.black, T().accent, openMainMenu)
 
         return
     end
@@ -1892,16 +2753,22 @@ local function drawConvoList()
     fill(1, 2, lw, h - 1, T().panel)
     text(2, 2, "Chats", T().text, T().panel)
 
+    local unread = totalUnread()
+    if unread > 0 then
+        text(math.max(2, lw - #tostring(unread) - 1), 2, tostring(unread), colors.yellow, T().panel)
+    end
+
     local list = getConvoList()
-    local maxRows = h - 7
+    local buttonRows = h >= 21 and 3 or 2
+    local maxRows = math.max(1, h - 4 - buttonRows)
     local y = 4
 
     for i = 1, math.min(#list, maxRows) do
         local c = list[i]
         local selected = c.key == state.current
-        local mark = (c.unread or 0) > 0 and "*" or " "
-        local icon = c.type == "pm" and "@" or "#"
-        local label = mark .. icon .. tostring(c.title or c.key)
+        local unreadMark = (c.unread or 0) > 0 and tostring(c.unread) or ""
+        local label = chatLabel(c, true)
+        if unreadMark ~= "" then label = label .. " (" .. unreadMark .. ")" end
 
         local bkg = selected and T().accent or T().panel
         local col = selected and colors.black or T().text
@@ -1919,30 +2786,31 @@ local function drawConvoList()
         y = y + 1
     end
 
-    local by = h - 3
+    local by = h - buttonRows + 1
+    local gap = 1
+    local b1 = math.max(6, math.floor((lw - 3) / 2))
+    local b2 = math.max(6, lw - b1 - gap - 2)
 
-    addButton("side_new", 2, by, 5, "+", colors.black, T().good, function()
-        state.modal = "create"
-        state.modalInput = ""
-        state.modalMode = "public"
-    end)
+    addButton("side_chats", 2, by, b1, "Chats", colors.black, T().good, openChatsModal)
+    addButton("side_menu", 2 + b1 + gap, by, b2, "Menu", colors.black, T().accent, openMainMenu)
 
-    addButton("side_d", 8, by, 5, "D", colors.black, T().accent, requestDiscovery)
+    if buttonRows >= 2 then
+        addButton("side_people", 2, by + 1, b1, "People", colors.black, T().warn, function()
+            state.modal = "people"
+        end)
+        addButton("side_find", 2 + b1 + gap, by + 1, b2, "Find", colors.black, T().accent, requestDiscovery)
+    end
 
-    addButton("side_pm", 14, by, 5, "PM", colors.black, T().warn, function()
-        state.modal = "pm"
-        state.modalInput = ""
-    end)
-
-    addButton("side_people", 2, by + 1, 8, "People", colors.black, T().good, function()
-        state.modal = "people"
-    end)
-
-    addButton("side_me", 11, by + 1, 8, "Me", colors.black, T().accent, function()
-        state.modal = "profile"
-        state.modalMode = "profile"
-        state.modalInput = state.profile.display or state.username or ""
-    end)
+    if buttonRows >= 3 then
+        addButton("side_new", 2, by + 2, b1, "+Group", colors.black, T().good, function()
+            state.modal = "create"
+            state.modalInput = ""
+            state.modalMode = "public"
+        end)
+        addButton("side_help", 2 + b1 + gap, by + 2, b2, "Help", colors.black, colors.lightGray, function()
+            state.modal = "help"
+        end)
+    end
 end
 
 local function drawMessages()
@@ -1973,60 +2841,60 @@ end
 local function drawInputBar()
     local inputLines = getInputLines()
     local countText = tostring(#state.input) .. "/" .. tostring(APP.messageLimit)
-
-    if isPocket() then
-        fill(1, h - 4, w, 2, T().input)
-        text(1, h - 4, trim(inputLines[1], w), T().inputText, T().input)
-        text(1, h - 3, trim(inputLines[2], w), T().inputText, T().input)
-
-        fill(1, h - 2, w, 1, T().panel)
-
-        addButton("p_send", 1, h - 2, 6, "Send", colors.black, T().good, sendChat)
-
-        addButton("p_clear", 8, h - 2, 5, "Clr", colors.white, colors.gray, function()
-            state.input = ""
-        end)
-
-        addButton("p_theme", 14, h - 2, 5, "Thm", colors.black, T().accent, function()
-            state.modal = "theme"
-        end)
-
-        addButton("p_out", 20, h - 2, w - 19, "Out", colors.white, T().danger, logout)
-
-        fill(1, h - 1, w, 1, T().bg)
-        text(1, h - 1, trim("ENTER send | " .. countText, w), T().muted, T().bg)
-
-        fill(1, h, w, 1, T().bg)
-        text(1, h, trim("UP/DOWN scroll | D discover", w), T().muted, T().bg)
-
-        return
-    end
-
+    local rows = inputRows()
     local lw = leftWidth()
     local x = lw + 1
     local cw = w - lw
+    local top = h - rows - 2
 
-    fill(x, h - 4, cw, 1, T().panel)
+    if top < 3 then top = h - rows - 1 end
+    if top < 1 then top = 1 end
 
-    local c = state.convos[state.current] or {}
-    local title = c.type == "pm" and "@" .. tostring(c.title or state.current) or "#" .. tostring(c.title or state.current)
+    fill(x, top, cw, 1, T().panel)
 
-    text(x + 1, h - 4, trim(title, cw - 38), colors.yellow, T().panel)
+    if lw == 0 then
+        local sendW = w < 28 and 5 or 7
+        local menuW = w < 28 and 5 or 7
+        local chatsW = w < 28 and 5 or 7
+        local titleW = math.max(1, cw - sendW - menuW - chatsW - 3)
 
-    addButton("desktop_send", w - 32, h - 4, 7, "Send", colors.black, T().good, sendChat)
-    addButton("desktop_theme", w - 24, h - 4, 7, "Theme", colors.black, T().accent, function()
-        state.modal = "theme"
-    end)
-    addButton("desktop_out", w - 16, h - 4, 7, "Logout", colors.white, T().danger, logout)
+        text(x, top, trim(currentChatTitle(), titleW), colors.yellow, T().panel)
+        addButton("p_chats", math.max(1, w - sendW - menuW - chatsW - 2), top, chatsW, w < 28 and "Chat" or "Chats", colors.black, T().accent, openChatsModal)
+        addButton("p_menu", math.max(1, w - sendW - menuW - 1), top, menuW, "Menu", colors.black, T().accent, openMainMenu)
+        addButton("p_send", math.max(1, w - sendW + 1), top, sendW, "Send", colors.black, T().good, sendChat)
+    else
+        local btnArea = cw >= 46 and 32 or 16
+        text(x + 1, top, trim(currentChatTitle(), math.max(1, cw - btnArea - 2)), colors.yellow, T().panel)
 
-    fill(x, h - 3, cw, 2, T().input)
-    text(x, h - 3, trim(inputLines[1], cw), T().inputText, T().input)
-    text(x, h - 2, trim(inputLines[2], cw), T().inputText, T().input)
+        if cw >= 46 then
+            addButton("desktop_send", w - 31, top, 7, "Send", colors.black, T().good, sendChat)
+            addButton("desktop_menu", w - 23, top, 7, "Menu", colors.black, T().accent, openMainMenu)
+            addButton("desktop_help", w - 15, top, 6, "Help", colors.black, colors.lightGray, function()
+                state.modal = "help"
+            end)
+            addButton("desktop_out", w - 8, top, 8, "Logout", colors.white, T().danger, logout)
+        else
+            addButton("desktop_menu", w - 15, top, 7, "Menu", colors.black, T().accent, openMainMenu)
+            addButton("desktop_send", w - 7, top, 7, "Send", colors.black, T().good, sendChat)
+        end
+    end
 
-    fill(x, h - 1, cw, 1, T().bg)
-    text(x + 1, h - 1, trim("UP/DOWN scroll | " .. countText .. " | D discover | People for friends/block", cw - 1), T().muted, T().bg)
+    fill(x, top + 1, cw, rows, T().input)
+    if rows == 1 then
+        text(x, top + 1, trim(inputLines[2] ~= "" and inputLines[2] or inputLines[1], cw), T().inputText, T().input)
+    else
+        text(x, top + 1, trim(inputLines[1], cw), T().inputText, T().input)
+        text(x, top + 2, trim(inputLines[2], cw), T().inputText, T().input)
+    end
 
     fill(x, h, cw, 1, T().bg)
+    local hint
+    if lw == 0 then
+        hint = "Menu/Chats | " .. countText
+    else
+        hint = "TAB chat | /help | " .. countText
+    end
+    text(x + (lw == 0 and 0 or 1), h, trim(hint, cw - (lw == 0 and 0 or 1)), T().muted, T().bg)
 end
 
 local function drawChat()
@@ -2084,6 +2952,23 @@ local function handleNetworkMessage(senderId, msg)
 
     if not msg.user or not msg.publicId then return end
     if msg.publicId == state.publicId then return end
+
+    if msg.packetId then
+        local packetKey = tostring(msg.publicId) .. ":" .. tostring(msg.packetId)
+
+        if state.packetSeen[packetKey] then
+            return
+        end
+
+        state.packetSeen[packetKey] = true
+        table.insert(state.packetSeenOrder, packetKey)
+
+        while #state.packetSeenOrder > 500 do
+            local oldKey = table.remove(state.packetSeenOrder, 1)
+            state.packetSeen[oldKey] = nil
+        end
+    end
+
     if state.blocked[msg.publicId] then return end
 
     state.users[msg.publicId] = {
@@ -2107,7 +2992,7 @@ local function handleNetworkMessage(senderId, msg)
         local channels = {}
 
         for key, c in pairs(state.convos) do
-            if c.type == "public" and c.listed ~= false and c.private ~= true then
+            if c.type == "public" and c.listed ~= false and c.private ~= true and not state.leftGroups[key] then
                 table.insert(channels, {
                     key = key,
                     title = c.title,
@@ -2123,7 +3008,7 @@ local function handleNetworkMessage(senderId, msg)
     elseif msg.kind == "discover_reply" then
         if type(msg.channels) == "table" then
             for _, c in ipairs(msg.channels) do
-                if type(c) == "table" and c.key then
+                if type(c) == "table" and c.key and not state.leftGroups[c.key] then
                     state.discover[c.key] = {
                         key = c.key,
                         title = c.title or c.key,
@@ -2134,7 +3019,7 @@ local function handleNetworkMessage(senderId, msg)
         end
 
     elseif msg.kind == "channel_create" then
-        if msg.key and msg.listed ~= false then
+        if msg.key and msg.listed ~= false and not state.leftGroups[msg.key] then
             ensureConvo(msg.key, msg.title or msg.key, "public", msg.private or false, true, msg.user)
             state.discover[msg.key] = {
                 key = msg.key,
@@ -2147,14 +3032,27 @@ local function handleNetworkMessage(senderId, msg)
         return
 
     elseif msg.kind == "chat" then
-        if msg.key and msg.body then
-            ensureConvo(msg.key, msg.key, "public", false, true, "unknown")
+        if msg.key and msg.body and not state.leftGroups[msg.key] then
+            local known = state.convos[msg.key] ~= nil
+            local allowAuto = msg.key == "global" or (msg.listed ~= false and msg.private ~= true)
 
-            addMessage(msg.key, displayName(msg.user, msg.publicId, msg.profile), msg.body, "chat", {
-                msgId = msg.msgId,
-                fromId = msg.publicId
-            })
+            if known or allowAuto then
+                ensureConvo(msg.key, msg.title or msg.key, "public", msg.private or false, msg.listed ~= false, msg.user)
+
+                addMessage(msg.key, displayName(msg.user, msg.publicId, msg.profile), msg.body, "chat", {
+                    msgId = msg.msgId,
+                    fromId = msg.publicId
+                })
+            end
         end
+
+    elseif msg.kind == "channel_rename" then
+        if msg.key and msg.title and state.convos[msg.key] and not state.leftGroups[msg.key] then
+            renameGroupLocal(msg.key, msg.title, displayName(msg.user, msg.publicId, msg.profile))
+        end
+
+    elseif msg.kind == "channel_leave" then
+        return
 
     elseif msg.kind == "pm" then
         local intended = false
@@ -2182,6 +3080,51 @@ local function handleNetworkMessage(senderId, msg)
                     msgId = msg.msgId
                 })
             end
+        end
+
+
+    elseif msg.kind == "friend_request" then
+        if msg.toPublicId == state.publicId and not state.friends[msg.publicId] then
+            if not state.friendRequests.sent[msg.publicId] then
+                state.friendRequests.inbox[msg.publicId] = requestRecord(msg.publicId, state.users[msg.publicId], "incoming")
+                savePrefs()
+                systemMessage("Friend request from " .. displayName(msg.user, msg.publicId, msg.profile) .. ". Open People > Inbox.")
+            else
+                addFriendDirect(msg.publicId, state.users[msg.publicId])
+                broadcast("friend_accept", {
+                    toPublicId = msg.publicId
+                })
+                systemMessage("You and " .. displayName(msg.user, msg.publicId, msg.profile) .. " are now friends.")
+            end
+        end
+
+    elseif msg.kind == "friend_accept" then
+        if msg.toPublicId == state.publicId then
+            addFriendDirect(msg.publicId, state.users[msg.publicId])
+            systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " accepted your friend request.")
+        end
+
+    elseif msg.kind == "friend_decline" then
+        if msg.toPublicId == state.publicId then
+            cleanRequests(msg.publicId)
+            savePrefs()
+            systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " declined your friend request.")
+        end
+
+    elseif msg.kind == "friend_cancel" then
+        if msg.toPublicId == state.publicId then
+            if state.friendRequests and state.friendRequests.inbox then
+                state.friendRequests.inbox[msg.publicId] = nil
+                savePrefs()
+            end
+        end
+
+    elseif msg.kind == "unfriend" then
+        if msg.toPublicId == state.publicId then
+            state.friends[msg.publicId] = nil
+            cleanRequests(msg.publicId)
+            savePrefs()
+            systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " removed you as a friend.")
         end
 
     elseif msg.kind == "read" then
@@ -2213,7 +3156,10 @@ local function networkLoop()
         local senderId, msg = rednet.receive(APP.protocol, 0.1)
 
         if senderId then
-            handleNetworkMessage(senderId, msg)
+            local ok, err = pcall(handleNetworkMessage, senderId, msg)
+            if not ok then
+                addMessage("global", "system", "Network packet skipped: " .. trim(err, 80), "warn")
+            end
         end
     end
 end
@@ -2233,7 +3179,7 @@ local function typeIntoField(char)
     end
 
     if state.modal then
-        if state.modal == "create" or state.modal == "pm" or state.modal == "friend_search" or state.modal == "profile" then
+        if state.modal == "create" or state.modal == "pm" or state.modal == "friend_search" or state.modal == "profile" or state.modal == "group_rename" then
             if #state.modalInput < APP.messageLimit then
                 state.modalInput = state.modalInput .. char
             end
@@ -2285,7 +3231,7 @@ local function submitModal()
         local id, user = resolveUser(state.modalInput)
 
         if id and user then
-            friendUser(id, user)
+            sendFriendRequest(id, user)
             state.modal = "people"
             state.modalInput = ""
         else
@@ -2301,6 +3247,11 @@ local function submitModal()
 
         savePrefs()
         broadcast("hello", {})
+        state.modal = nil
+        state.modalInput = ""
+
+    elseif state.modal == "group_rename" then
+        renameCurrentGroup(state.modalInput)
         state.modal = nil
         state.modalInput = ""
 

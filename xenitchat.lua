@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "19.2.1",
+    version = "19.2.2",
     protocolVersion = 19,
     protocolName = "Obsidian",
     protocol = "xenitchat_bus",
@@ -1869,11 +1869,15 @@ local function httpRead(url)
 end
 
 local function parseRemoteVersion(raw)
-    local quoted = raw:match("version%s*=%s*([\"'])([%w%.%-_]+)%1")
-    if quoted then return quoted end
+    if type(raw) ~= "string" then return nil end
+
+    -- IMPORTANT: Lua returns only the first capture when assigned to one variable.
+    -- The old parser captured the quote character first, so GitHub showed as v".
+    local _, quoted = raw:match("version%s*=%s*([\"'])([%w%.%-_]+)%1")
+    if quoted and quoted ~= "" then return quoted end
 
     local numeric = raw:match("version%s*=%s*(%d+[%d%.]*)")
-    if numeric then return numeric end
+    if numeric and numeric ~= "" then return numeric end
 
     return nil
 end
@@ -1938,8 +1942,16 @@ local function checkForUpdate(auto, install, force, targetKey)
         return
     end
 
-    if compareVersions(remoteVersion, appVersion()) <= 0 and not force then
-        if not auto then systemMessage("Already up to date. Local v" .. appVersion() .. ", GitHub v" .. tostring(remoteVersion) .. ".", targetKey) end
+    local cmp = compareVersions(remoteVersion, appVersion())
+
+    if cmp <= 0 and not force then
+        if not auto then
+            if cmp == 0 then
+                systemMessage("Already up to date. Local v" .. appVersion() .. ", GitHub v" .. tostring(remoteVersion) .. ".", targetKey)
+            else
+                systemMessage("Local build is newer than GitHub. Local v" .. appVersion() .. ", GitHub v" .. tostring(remoteVersion) .. ". Use /update force to downgrade/install anyway.", targetKey)
+            end
+        end
         state.updateBusy = false
         return
     end

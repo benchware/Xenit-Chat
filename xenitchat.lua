@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = 15,
+    version = 16,
     protocol = "xenitchat_bus",
     updateUrl = "https://raw.githubusercontent.com/benchware/Xenit-Chat/main/xenitchat.lua",
 
@@ -155,6 +155,7 @@ local state = {
 }
 
 local seq = 0
+local sendTo = nil -- forward declaration for early history sync calls
 
 -- ============================================================
 -- Theme / UI helpers
@@ -1497,7 +1498,7 @@ local function broadcast(kind, data)
     rednet.broadcast(makePacket(kind, data), APP.protocol)
 end
 
-local function sendTo(id, kind, data)
+sendTo = function(id, kind, data)
     if not state.username or not state.publicId then return end
     rednet.send(id, makePacket(kind, data), APP.protocol)
 end

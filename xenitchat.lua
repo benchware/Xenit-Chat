@@ -4,9 +4,9 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "19.1.20",
+    version = "19.2.0",
     protocolVersion = 19,
-    protocolName = "Quartz",
+    protocolName = "Obsidian",
     protocol = "xenitchat_bus",
     updateUrl = "https://raw.githubusercontent.com/benchware/Xenit-Chat/main/xenitchat.lua",
 
@@ -20,6 +20,9 @@ local APP = {
     historySyncLimit = 80,
     historySyncCooldown = 12,
     versionNoticeCooldown = 90,
+    maxPacketBytes = 12000,
+    floodWindow = 6,
+    floodLimit = 24,
 
     helloInterval = 4,
     onlineTimeout = 15,
@@ -231,6 +234,25 @@ local state = {
     pinned = {},
     quietVersionWarnings = true,
     allowOldClients = false,
+    showTimestamps = true,
+    compactMessages = false,
+    showReadReceipts = true,
+    showSystemMessages = true,
+    friendNotifications = true,
+    pingNotifications = true,
+    autoHistorySync = true,
+    dmPrivacy = "anyone",
+    autoJoinPublicGroups = true,
+    requireFriendForHistory = false,
+    autoBlockFlood = false,
+    securityAlerts = true,
+    muted = {},
+    trusted = {},
+    knownIdentities = {},
+    rateBuckets = {},
+    securityEvents = {},
+    pingPending = {},
+    pingOrder = {},
     restartRequested = false,
     exitReason = nil,
     profile = {
@@ -706,6 +728,21 @@ local function defaultPrefs()
         pinned = {},
         quietVersionWarnings = true,
         allowOldClients = false,
+        showTimestamps = true,
+        compactMessages = false,
+        showReadReceipts = true,
+        showSystemMessages = true,
+        friendNotifications = true,
+        pingNotifications = true,
+        autoHistorySync = true,
+        dmPrivacy = "anyone",
+        autoJoinPublicGroups = true,
+        requireFriendForHistory = false,
+        autoBlockFlood = false,
+        securityAlerts = true,
+        muted = {},
+        trusted = {},
+        knownIdentities = {},
         convos = {
             global = {
                 key = "global",
@@ -735,6 +772,21 @@ local function savePrefs()
         pinned = state.pinned,
         quietVersionWarnings = state.quietVersionWarnings,
         allowOldClients = state.allowOldClients,
+        showTimestamps = state.showTimestamps,
+        compactMessages = state.compactMessages,
+        showReadReceipts = state.showReadReceipts,
+        showSystemMessages = state.showSystemMessages,
+        friendNotifications = state.friendNotifications,
+        pingNotifications = state.pingNotifications,
+        autoHistorySync = state.autoHistorySync,
+        dmPrivacy = state.dmPrivacy,
+        autoJoinPublicGroups = state.autoJoinPublicGroups,
+        requireFriendForHistory = state.requireFriendForHistory,
+        autoBlockFlood = state.autoBlockFlood,
+        securityAlerts = state.securityAlerts,
+        muted = state.muted,
+        trusted = state.trusted,
+        knownIdentities = state.knownIdentities,
         convos = state.convos
     }
 
@@ -756,6 +808,21 @@ local function loadPrefs()
     if type(data.pinned) ~= "table" then data.pinned = {} end
     if type(data.quietVersionWarnings) ~= "boolean" then data.quietVersionWarnings = true end
     if type(data.allowOldClients) ~= "boolean" then data.allowOldClients = false end
+    if type(data.showTimestamps) ~= "boolean" then data.showTimestamps = true end
+    if type(data.compactMessages) ~= "boolean" then data.compactMessages = false end
+    if type(data.showReadReceipts) ~= "boolean" then data.showReadReceipts = true end
+    if type(data.showSystemMessages) ~= "boolean" then data.showSystemMessages = true end
+    if type(data.friendNotifications) ~= "boolean" then data.friendNotifications = true end
+    if type(data.pingNotifications) ~= "boolean" then data.pingNotifications = true end
+    if type(data.autoHistorySync) ~= "boolean" then data.autoHistorySync = true end
+    if data.dmPrivacy ~= "friends" and data.dmPrivacy ~= "none" then data.dmPrivacy = "anyone" end
+    if type(data.autoJoinPublicGroups) ~= "boolean" then data.autoJoinPublicGroups = true end
+    if type(data.requireFriendForHistory) ~= "boolean" then data.requireFriendForHistory = false end
+    if type(data.autoBlockFlood) ~= "boolean" then data.autoBlockFlood = false end
+    if type(data.securityAlerts) ~= "boolean" then data.securityAlerts = true end
+    if type(data.muted) ~= "table" then data.muted = {} end
+    if type(data.trusted) ~= "table" then data.trusted = {} end
+    if type(data.knownIdentities) ~= "table" then data.knownIdentities = {} end
     if type(data.profile) ~= "table" then data.profile = { display = "", status = "Available" } end
 
     state.remember = data.remember ~= false
@@ -769,6 +836,21 @@ local function loadPrefs()
     state.pinned = data.pinned
     state.quietVersionWarnings = data.quietVersionWarnings
     state.allowOldClients = data.allowOldClients
+    state.showTimestamps = data.showTimestamps
+    state.compactMessages = data.compactMessages
+    state.showReadReceipts = data.showReadReceipts
+    state.showSystemMessages = data.showSystemMessages
+    state.friendNotifications = data.friendNotifications
+    state.pingNotifications = data.pingNotifications
+    state.autoHistorySync = data.autoHistorySync
+    state.dmPrivacy = data.dmPrivacy
+    state.autoJoinPublicGroups = data.autoJoinPublicGroups
+    state.requireFriendForHistory = data.requireFriendForHistory
+    state.autoBlockFlood = data.autoBlockFlood
+    state.securityAlerts = data.securityAlerts
+    state.muted = data.muted
+    state.trusted = data.trusted
+    state.knownIdentities = data.knownIdentities
     state.convos = data.convos
 
     if not state.convos.global then
@@ -1168,6 +1250,7 @@ end
 
 local function requestHistorySync(senderId, publicId)
     if not senderId or not publicId then return end
+    if shouldShareHistoryWith and not shouldShareHistoryWith(publicId) then return end
 
     local now = os.clock()
     if state.historySyncLast[publicId] and now - state.historySyncLast[publicId] < APP.historySyncCooldown then
@@ -1321,37 +1404,44 @@ local function buildVisualLines(key, width)
         local color = T().text
         local prefix = ""
 
-        if m.kind == "system" then
-            color = T().muted
-            prefix = "i "
-        elseif m.kind == "warn" then
-            color = T().danger
-            prefix = "! "
-        elseif m.kind == "pm" then
-            color = colors.purple
-            prefix = "PM "
+        if (m.kind == "system" or m.kind == "warn") and state.showSystemMessages == false then
+            -- hidden by user preference
         else
-            color = T().text
-
-            if isPocket() then
-                prefix = tostring(m.from or "user") .. ": "
-            else
-                prefix = "[" .. tostring(m.time or "") .. "] " .. tostring(m.from or "user") .. ": "
-            end
-        end
-
-        local wrapped = wrapText(prefix, m.body, width, color)
-
-        for _, line in ipairs(wrapped) do
-            line.color = color
-            table.insert(visual, line)
-        end
-
-        if m.outgoing and m.seen then
-            table.insert(visual, {
-                text = "  Seen",
+            if m.kind == "system" then
                 color = T().muted
-            })
+                prefix = state.compactMessages and "· " or "i "
+            elseif m.kind == "warn" then
+                color = T().danger
+                prefix = "! "
+            elseif m.kind == "pm" then
+                color = colors.purple
+                prefix = state.compactMessages and "@ " or "DM "
+            else
+                color = T().text
+
+                local name = tostring(m.from or "user")
+                if state.compactMessages and #name > 12 then name = trim(name, 12) end
+
+                if state.showTimestamps == false or isPocket() then
+                    prefix = name .. ": "
+                else
+                    prefix = "[" .. tostring(m.time or "") .. "] " .. name .. ": "
+                end
+            end
+
+            local wrapped = wrapText(prefix, m.body, width, color)
+
+            for _, line in ipairs(wrapped) do
+                line.color = color
+                table.insert(visual, line)
+            end
+
+            if state.showReadReceipts ~= false and m.outgoing and m.seen then
+                table.insert(visual, {
+                    text = state.compactMessages and "  ✓ Seen" or "  Seen",
+                    color = T().muted
+                })
+            end
         end
     end
 
@@ -2028,10 +2118,289 @@ local function showVersionInfo()
     systemMessage("XenitChat v" .. appVersion() .. " | Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()) .. " | Older clients: " .. (state.allowOldClients and "ON (BUGGY)" or "OFF"))
 end
 
+
+function pingId()
+    return "ping-" .. tostring(os.getComputerID()) .. "-" .. randomToken(8)
+end
+
+function pingMs(started)
+    return math.max(0, math.floor((os.clock() - (started or os.clock())) * 1000 + 0.5))
+end
+
+function rememberPing(id, targetId, targetName, scope, key)
+    state.pingPending = state.pingPending or {}
+    state.pingOrder = state.pingOrder or {}
+    state.pingPending[id] = { started = os.clock(), targetId = targetId, targetName = targetName, scope = scope or "user", key = key, replies = 0, names = {} }
+    table.insert(state.pingOrder, id)
+    while #state.pingOrder > 16 do
+        local old = table.remove(state.pingOrder, 1)
+        state.pingPending[old] = nil
+    end
+end
+
+function sendPing(targetText)
+    targetText = tostring(targetText or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local cleanTarget = targetText:gsub("^@", "")
+    local id = pingId()
+
+    if cleanTarget == "everyone" or cleanTarget == "all" then
+        rememberPing(id, nil, "@everyone", "everyone", nil)
+        broadcast("ping", { pingId = id, scope = "everyone" })
+        systemMessage("Pinging @everyone...")
+        return
+    end
+
+    if cleanTarget == "here" then
+        local c = state.convos[state.current] or {}
+        rememberPing(id, nil, "@here", "here", state.current)
+        broadcast("ping", { pingId = id, scope = "here", key = state.current, title = c.title or state.current })
+        systemMessage("Pinging @here in " .. chatLabel(c, true) .. "...")
+        return
+    end
+
+    if cleanTarget ~= "" then
+        local publicId, user = resolveUser(cleanTarget)
+        if not publicId or not user then
+            systemMessage("Ping failed: user not found online. Try /people first.")
+            return
+        end
+        local name = displayName(user.username, publicId, user.profile)
+        rememberPing(id, publicId, name, "user", nil)
+        local payload = { pingId = id, toPublicId = publicId, scope = "user" }
+        if user.senderId then sendTo(user.senderId, "ping", payload) else broadcast("ping", payload) end
+        systemMessage("Pinging " .. name .. "...")
+        return
+    end
+
+    rememberPing(id, nil, "network", "network", nil)
+    broadcast("ping", { pingId = id, scope = "network" })
+    systemMessage("Pinging online clients...")
+end
+
+function receivePong(msg)
+    if not msg or msg.toPublicId ~= state.publicId or not msg.pingId then return end
+    local pending = state.pingPending and state.pingPending[msg.pingId]
+    if not pending then return end
+    local who = displayName(msg.user, msg.publicId, msg.profile)
+    if pending.names[who] then return end
+    pending.names[who] = true
+    pending.replies = (pending.replies or 0) + 1
+    systemMessage("Pong [" .. tostring(pending.scope or "ping") .. "] from " .. who .. ": " .. tostring(pingMs(pending.started)) .. " ms")
+    if pending.targetId then state.pingPending[msg.pingId] = nil end
+end
+
+function shouldAnswerPing(msg)
+    if not msg.pingId then return false end
+    if msg.toPublicId then return msg.toPublicId == state.publicId end
+    local scope = msg.scope or "network"
+    if scope == "everyone" or scope == "network" then return true end
+    if scope == "here" then return msg.key ~= nil and state.current == msg.key end
+    return true
+end
+
+function checkPingTimeouts()
+    if not state.pingPending then return end
+    local now = os.clock()
+    for id, pending in pairs(state.pingPending) do
+        if now - (pending.started or now) > 3.5 then
+            if (pending.replies or 0) == 0 then
+                if pending.targetName and pending.targetName ~= "network" then
+                    systemMessage("Ping timed out: " .. tostring(pending.targetName) .. " did not reply.")
+                else
+                    systemMessage("Ping finished: no online clients replied.")
+                end
+            else
+                systemMessage("Ping finished: " .. tostring(pending.replies) .. " reply/replies.")
+            end
+            state.pingPending[id] = nil
+        end
+    end
+end
+
+function toggleBoolSetting(field, label)
+    state[field] = not state[field]
+    savePrefs()
+    systemMessage(label .. ": " .. (state[field] and "ON" or "OFF") .. ".")
+end
+
 local function openSettingsModal()
     state.modal = "settings"
     state.modalInput = ""
     state.modalData = nil
+end
+
+
+-- ============================================================
+-- Security / privacy helpers
+-- ============================================================
+
+function isFriend(publicId)
+    return publicId and state.friends and state.friends[publicId] ~= nil
+end
+
+function isMuted(publicId)
+    return publicId and state.muted and state.muted[publicId] ~= nil
+end
+
+function safetyCode(publicId)
+    local raw = slowHash("SAFE|" .. tostring(publicId or ""), 40):gsub("%-", "")
+    local out = {}
+    for i = 1, 18, 3 do
+        table.insert(out, raw:sub(i, i + 2))
+    end
+    return table.concat(out, "-")
+end
+
+function recordSecurityEvent(body)
+    if not state.securityEvents then state.securityEvents = {} end
+    table.insert(state.securityEvents, 1, { time = os.time(), body = tostring(body or "") })
+    while #state.securityEvents > 12 do table.remove(state.securityEvents) end
+    if state.securityAlerts ~= false then
+        systemMessage("Security: " .. tostring(body or "notice"))
+    end
+end
+
+function packetByteSize(msg)
+    local ok, raw = pcall(textutils.serialize, msg)
+    if ok and raw then return #raw end
+    return 0
+end
+
+function rateLimited(publicId, kind)
+    publicId = tostring(publicId or "unknown")
+    kind = tostring(kind or "?")
+    local now = os.clock()
+    local key = publicId .. "|" .. kind
+    local bucket = state.rateBuckets[key]
+    if not bucket or now - (bucket.start or 0) > APP.floodWindow then
+        state.rateBuckets[key] = { start = now, count = 1 }
+        return false
+    end
+    bucket.count = (bucket.count or 0) + 1
+    if bucket.count > APP.floodLimit then
+        if state.autoBlockFlood then
+            state.blocked[publicId] = true
+            savePrefs()
+            recordSecurityEvent("Auto-blocked flooder #" .. shortId(publicId) .. " (" .. kind .. ").")
+        end
+        return true
+    end
+    return false
+end
+
+function trustUser(publicId, user)
+    if not publicId then return end
+    user = user or state.users[publicId] or {}
+    state.trusted[publicId] = {
+        username = user.username or "unknown",
+        nodeId = user.nodeId,
+        code = safetyCode(publicId),
+        time = os.time()
+    }
+    savePrefs()
+    systemMessage("Trusted " .. displayName(user.username, publicId, user.profile) .. " | Safety " .. safetyCode(publicId))
+end
+
+function untrustUser(publicId)
+    if not publicId then return end
+    state.trusted[publicId] = nil
+    savePrefs()
+    systemMessage("Removed trusted device #" .. shortId(publicId) .. ".")
+end
+
+function muteUser(publicId, user)
+    if not publicId then return end
+    user = user or state.users[publicId] or {}
+    state.muted[publicId] = { username = user.username or "unknown", time = os.time() }
+    savePrefs()
+    systemMessage("Muted " .. displayName(user.username, publicId, user.profile) .. ".")
+end
+
+function unmuteUser(publicId)
+    if not publicId then return end
+    state.muted[publicId] = nil
+    savePrefs()
+    systemMessage("Unmuted #" .. shortId(publicId) .. ".")
+end
+
+function shouldAcceptDm(publicId)
+    if state.dmPrivacy == "none" then return false end
+    if state.dmPrivacy == "friends" and not isFriend(publicId) then return false end
+    return true
+end
+
+function shouldShareHistoryWith(publicId)
+    if state.requireFriendForHistory and not isFriend(publicId) then return false end
+    return not state.blocked[publicId]
+end
+
+function recordIdentity(publicId, msg)
+    if not publicId then return end
+    if not state.knownIdentities then state.knownIdentities = {} end
+    local known = state.knownIdentities[publicId]
+    local username = tostring(msg.user or "unknown")
+    local nodeId = tostring(msg.nodeId or "?")
+    if known then
+        if known.username and known.username ~= username then
+            recordSecurityEvent("Known ID #" .. shortId(publicId) .. " changed name from " .. known.username .. " to " .. username .. ".")
+        end
+        if known.nodeId and tostring(known.nodeId) ~= nodeId then
+            recordSecurityEvent("Known user " .. username .. " changed device ID. Verify safety code.")
+        end
+    end
+    state.knownIdentities[publicId] = { username = username, nodeId = nodeId, last = os.time(), code = safetyCode(publicId) }
+end
+
+function dmPrivacyLabel()
+    if state.dmPrivacy == "friends" then return "Friends only" end
+    if state.dmPrivacy == "none" then return "No DMs" end
+    return "Anyone"
+end
+
+function cycleDmPrivacy()
+    if state.dmPrivacy == "anyone" then state.dmPrivacy = "friends"
+    elseif state.dmPrivacy == "friends" then state.dmPrivacy = "none"
+    else state.dmPrivacy = "anyone" end
+    savePrefs()
+    systemMessage("DM privacy: " .. dmPrivacyLabel() .. ".")
+end
+
+function openSecurityModal()
+    state.modal = "security"
+    state.modalInput = ""
+    state.modalData = nil
+end
+
+function showSafetyFor(value)
+    if not value or value == "" then
+        systemMessage("Usage: /safety @user")
+        return
+    end
+    local id, user = resolveUser(value)
+    if id then
+        systemMessage("Safety for " .. displayName(user.username, id, user.profile) .. ": " .. safetyCode(id))
+        systemMessage("Compare this code on both devices before trusting sensitive DMs.")
+    else
+        systemMessage("User not found online. Use /people first, then /safety @name.")
+    end
+end
+
+function showSecurityAudit()
+    local muted, trusted, blocked = 0, 0, 0
+    for _ in pairs(state.muted or {}) do muted = muted + 1 end
+    for _ in pairs(state.trusted or {}) do trusted = trusted + 1 end
+    for _ in pairs(state.blocked or {}) do blocked = blocked + 1 end
+    systemMessage("Security audit: DM=" .. dmPrivacyLabel() .. ", muted=" .. muted .. ", trusted=" .. trusted .. ", blocked=" .. blocked .. ".")
+    systemMessage("History sharing requires friends: " .. ((state.requireFriendForHistory and "ON") or "OFF") .. " | Auto-block flood: " .. ((state.autoBlockFlood and "ON") or "OFF"))
+end
+
+function backupLocalData()
+    local suffix = tostring(os.getComputerID()) .. "_" .. tostring(os.time())
+    local base = ".xenit_backup_" .. suffix
+    local prefs = readSerialized(APP.prefsFile, nil)
+    local history = readSerialized(APP.historyFile, nil)
+    writeSerialized(base, { app = APP.name, version = appVersion(), prefs = prefs, history = history })
+    systemMessage("Backup saved: " .. base)
 end
 
 
@@ -2043,6 +2412,7 @@ COMMAND_HELP = {
             { cmd = "/menu", desc = "Open the main menu." },
             { cmd = "/chats", desc = "Open your chat list." },
             { cmd = "/settings", desc = "Open settings and compatibility toggles.", aliases = {"/prefs"} },
+            { cmd = "/security", desc = "Open Security Center.", aliases = {"/safe", "/privacy"} },
             { cmd = "/theme", desc = "Pick a theme." }
         }
     },
@@ -2055,7 +2425,13 @@ COMMAND_HELP = {
             { cmd = "/inbox", desc = "Open friend request inbox.", aliases = {"/requests"} },
             { cmd = "/block", args = "@name-or-id", desc = "Block a user." },
             { cmd = "/unblock", args = "@name-or-id", desc = "Unblock a user." },
+            { cmd = "/mute", args = "@name-or-id", desc = "Hide messages from a user without blocking." },
+            { cmd = "/unmute", args = "@name-or-id", desc = "Allow messages from a muted user again." },
+            { cmd = "/trust", args = "@name-or-id", desc = "Trust a user after comparing safety code." },
+            { cmd = "/untrust", args = "@name-or-id", desc = "Remove a trusted user." },
+            { cmd = "/safety", args = "@name-or-id", desc = "Show a user safety code." },
             { cmd = "/who", desc = "List online users.", aliases = {"/online"} },
+            { cmd = "/ping", args = "[@user|@here|@everyone]", desc = "Check latency to a user, current chat, or everyone." },
             { cmd = "/id", desc = "Show your short ID.", aliases = {"/myid"} }
         }
     },
@@ -2088,6 +2464,9 @@ COMMAND_HELP = {
             { cmd = "/version", desc = "Show app/protocol version.", aliases = {"/about"} },
             { cmd = "/compat", desc = "Toggle older-client mode. BUGGY.", aliases = {"/legacy", "/oldclients"} },
             { cmd = "/quiet", desc = "Toggle version warning noise filter." },
+            { cmd = "/privacy", desc = "Cycle DM privacy: anyone, friends-only, no DMs." },
+            { cmd = "/audit", desc = "Run a quick security audit." },
+            { cmd = "/backup", desc = "Backup preferences and local chat history." },
             { cmd = "/app", desc = "Open app controls.", aliases = {"/controls"} },
             { cmd = "/logout", desc = "Logout to the login screen." },
             { cmd = "/exit", desc = "Close XenitChat.", aliases = {"/quit", "/close"} },
@@ -2200,6 +2579,10 @@ local function handleSlashCommand(body)
         state.modal = "theme"
     elseif command == "settings" or command == "prefs" then
         openSettingsModal()
+    elseif command == "security" or command == "safe" then
+        openSecurityModal()
+    elseif command == "privacy" then
+        if rest == "" then cycleDmPrivacy() else openSecurityModal() end
     elseif command == "discover" or command == "d" then
         requestDiscovery()
     elseif command == "update" then
@@ -2223,6 +2606,13 @@ local function handleSlashCommand(body)
         toggleQuietVersionWarnings()
     elseif command == "compat" or command == "legacy" or command == "oldclients" then
         toggleOldClientCompat()
+    elseif command == "audit" then
+        showSecurityAudit()
+    elseif command == "backup" then
+        backupLocalData()
+    elseif command == "ping" then
+        sendPing(rest)
+
     elseif command == "version" or command == "about" then
         showVersionInfo()
     elseif command == "sync" or command == "history" then
@@ -2270,8 +2660,39 @@ local function handleSlashCommand(body)
             showHelpForCommand("unblock")
         else
             local id = resolveBlocked(rest)
+            if not id then id = resolveUser(rest) end
             if id then unblockUser(id) systemMessage("Unblocked " .. shortId(id) .. ".") else systemMessage("Blocked user not found. Open /blocked to see the list.") end
         end
+    elseif command == "mute" then
+        if rest == "" then
+            showHelpForCommand("mute")
+        else
+            local id, user = resolveUser(rest)
+            if id then muteUser(id, user) else systemMessage("User not found online. Try /people or /mute @shortid.") end
+        end
+    elseif command == "unmute" then
+        if rest == "" then
+            showHelpForCommand("unmute")
+        else
+            local id, user = resolveUser(rest)
+            if id then unmuteUser(id) else systemMessage("User not found online. Try /people or /unmute @shortid.") end
+        end
+    elseif command == "trust" then
+        if rest == "" then
+            showHelpForCommand("trust")
+        else
+            local id, user = resolveUser(rest)
+            if id then trustUser(id, user) else systemMessage("User not found online. Try /people or /trust @shortid.") end
+        end
+    elseif command == "untrust" then
+        if rest == "" then
+            showHelpForCommand("untrust")
+        else
+            local id = resolveUser(rest)
+            if id then untrustUser(id) else systemMessage("User not found online. Try /people or /untrust @shortid.") end
+        end
+    elseif command == "safety" then
+        showSafetyFor(rest)
     elseif command == "status" then
         state.profile.status = rest ~= "" and trim(rest, 40) or "Available"
         savePrefs()
@@ -3013,7 +3434,7 @@ end
 local function drawPeopleModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 11 or 13)
 
-    modalHeader(mx, my, mw, "People", "o online  * friend  ! request  ? sent")
+    modalHeader(mx, my, mw, "People & Friends", "online • friends first • click a user")
 
     local list = getSortedUsers()
     local maxRows = mh - 5
@@ -3034,7 +3455,11 @@ local function drawPeopleModal()
             end
 
             local online = os.clock() - (u.lastSeenClock or 0) <= APP.onlineTimeout and "o" or "-"
-            local label = online .. rel .. " " .. name .. " #" .. shortId(u.publicId)
+            local relName = ""
+            if rel == "*" then relName = " friend"
+            elseif rel == "!" then relName = " wants to add you"
+            elseif rel == "?" then relName = " request sent" end
+            local label = online .. " " .. name .. relName .. " #" .. shortId(u.publicId)
 
             addButton("person_" .. tostring(i), mx + 1, my + 2 + i, mw - 2, trim(label, mw - 2), colors.black, colors.white, function()
                 state.modal = "user_info"
@@ -3192,12 +3617,13 @@ local function drawUserInfoModal()
     local name = displayName(user.username, id, user.profile)
     local status = (user.profile and user.profile.status) or "Available"
 
-    local mx, my, mw, mh = modalBox(isPocket() and w or 48, isPocket() and 10 or 11)
+    local mx, my, mw, mh = modalBox(isPocket() and w or 54, isPocket() and 13 or 14)
 
     modalHeader(mx, my, mw, "User info", nil)
     text(mx + 1, my + 3, trim("Name: " .. name, mw - 2), colors.black, colors.lightGray)
     text(mx + 1, my + 4, trim("Status: " .. status, mw - 2), colors.gray, colors.lightGray)
-    text(mx + 1, my + 5, trim("ID: " .. shortId(id), mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 5, trim("ID: " .. shortId(id) .. " | Safety: " .. safetyCode(id), mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 6, trim("Trust: " .. (state.trusted[id] and "trusted" or "not trusted") .. " | Mute: " .. (state.muted[id] and "muted" or "off"), mw - 2), colors.gray, colors.lightGray)
 
     local friendLabel = "Request"
 
@@ -3245,6 +3671,20 @@ local function drawUserInfoModal()
             state.modal = "blocked"
         end
     end)
+
+    local by2 = by + 1
+    if by2 <= my + mh - 1 then
+        addButton("ui_mute", mx + 1, by2, 9, state.muted[id] and "Unmute" or "Mute", colors.black, colors.lightGray, function()
+            if state.muted[id] then unmuteUser(id) else muteUser(id, user) end
+        end)
+        addButton("ui_trust", mx + 11, by2, 10, state.trusted[id] and "Untrust" or "Trust", colors.black, state.trusted[id] and colors.lightGray or T().warn, function()
+            if state.trusted[id] then untrustUser(id) else trustUser(id, user) end
+        end)
+        addButton("ui_safety", mx + 22, by2, 8, "Safety", colors.black, T().accent, function()
+            systemMessage("Safety for " .. name .. ": " .. safetyCode(id))
+            state.modal = nil
+        end)
+    end
 
     addButton("ui_close", mx + mw - 8, by, 8, "Close", colors.white, colors.gray, function()
         state.modal = "people"
@@ -3294,22 +3734,83 @@ end
 
 
 local function drawSettingsModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 54, isPocket() and 12 or 13)
+    local mx, my, mw, mh = modalBox(isPocket() and w or 64, isPocket() and 22 or 24)
 
     modalHeader(mx, my, mw, "Settings", "Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()))
 
-    text(mx + 1, my + 3, trim("App version: v" .. appVersion(), mw - 2), colors.black, colors.lightGray)
-    text(mx + 1, my + 4, trim("Protocol codename: " .. protocolName(), mw - 2), colors.gray, colors.lightGray)
-    text(mx + 1, my + 5, trim("Compatibility number: " .. tostring(protocolVersion()), mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 3, trim("App v" .. appVersion() .. " | Codename: " .. protocolName(), mw - 2), colors.black, colors.lightGray)
+    text(mx + 1, my + 4, trim("Compatibility number: " .. tostring(protocolVersion()), mw - 2), colors.gray, colors.lightGray)
+
+    local function onoff(v) return v and "ON" or "OFF" end
+    local y = my + 6
+
+    addButton("set_time", mx + 1, y, mw - 2, "Show message time: " .. onoff(state.showTimestamps ~= false), colors.black, state.showTimestamps ~= false and T().good or colors.white, function()
+        toggleBoolSetting("showTimestamps", "Show message time")
+    end)
+    y = y + 1
+
+    addButton("set_compact", mx + 1, y, mw - 2, "Compact messages: " .. onoff(state.compactMessages == true), colors.black, state.compactMessages and T().accent or colors.white, function()
+        toggleBoolSetting("compactMessages", "Compact messages")
+    end)
+    y = y + 1
+
+    addButton("set_seen", mx + 1, y, mw - 2, "Show read receipts: " .. onoff(state.showReadReceipts ~= false), colors.black, state.showReadReceipts ~= false and T().good or colors.white, function()
+        toggleBoolSetting("showReadReceipts", "Show read receipts")
+    end)
+    y = y + 1
+
+    addButton("set_system", mx + 1, y, mw - 2, "Show system messages: " .. onoff(state.showSystemMessages ~= false), colors.black, state.showSystemMessages ~= false and T().good or colors.white, function()
+        toggleBoolSetting("showSystemMessages", "Show system messages")
+    end)
+    y = y + 1
+
+    addButton("set_friendnote", mx + 1, y, mw - 2, "Friend notifications: " .. onoff(state.friendNotifications ~= false), colors.black, state.friendNotifications ~= false and T().good or colors.white, function()
+        toggleBoolSetting("friendNotifications", "Friend notifications")
+    end)
+    y = y + 1
+
+    addButton("set_pingnote", mx + 1, y, mw - 2, "Ping notifications: " .. onoff(state.pingNotifications ~= false), colors.black, state.pingNotifications ~= false and T().good or colors.white, function()
+        toggleBoolSetting("pingNotifications", "Ping notifications")
+    end)
+    y = y + 1
+
+    addButton("set_historysync", mx + 1, y, mw - 2, "Auto history sync: " .. onoff(state.autoHistorySync ~= false), colors.black, state.autoHistorySync ~= false and T().good or colors.white, function()
+        toggleBoolSetting("autoHistorySync", "Auto history sync")
+    end)
+    y = y + 1
+
+    addButton("set_dmprivacy", mx + 1, y, mw - 2, "DM privacy: " .. dmPrivacyLabel(), colors.black, state.dmPrivacy == "anyone" and colors.white or T().warn, cycleDmPrivacy)
+    y = y + 1
+
+    addButton("set_autojoin", mx + 1, y, mw - 2, "Auto-join public groups: " .. onoff(state.autoJoinPublicGroups ~= false), colors.black, state.autoJoinPublicGroups ~= false and T().good or colors.white, function()
+        toggleBoolSetting("autoJoinPublicGroups", "Auto-join public groups")
+    end)
+    y = y + 1
+
+    addButton("set_historyfriends", mx + 1, y, mw - 2, "History sync friends-only: " .. onoff(state.requireFriendForHistory == true), colors.black, state.requireFriendForHistory and T().warn or colors.white, function()
+        toggleBoolSetting("requireFriendForHistory", "History sync friends-only")
+    end)
+    y = y + 1
+
+    addButton("set_flood", mx + 1, y, mw - 2, "Auto-block flood spam: " .. onoff(state.autoBlockFlood == true), colors.black, state.autoBlockFlood and T().warn or colors.white, function()
+        toggleBoolSetting("autoBlockFlood", "Auto-block flood spam")
+    end)
+    y = y + 1
+
+    addButton("set_secalerts", mx + 1, y, mw - 2, "Security alerts: " .. onoff(state.securityAlerts ~= false), colors.black, state.securityAlerts ~= false and T().good or colors.white, function()
+        toggleBoolSetting("securityAlerts", "Security alerts")
+    end)
+    y = y + 1
 
     local quietLabel = state.quietVersionWarnings and "Quiet version spam: ON" or "Quiet version spam: OFF"
     local oldLabel = state.allowOldClients and "Talk to older clients: ON (BUGGY)" or "Talk to older clients: OFF"
 
-    addButton("set_quiet", mx + 1, my + 7, mw - 2, quietLabel, colors.black, state.quietVersionWarnings and T().good or colors.gray, toggleQuietVersionWarnings)
-    addButton("set_old", mx + 1, my + 8, mw - 2, oldLabel, colors.black, state.allowOldClients and T().warn or colors.white, toggleOldClientCompat)
+    addButton("set_quiet", mx + 1, y, mw - 2, quietLabel, colors.black, state.quietVersionWarnings and T().good or colors.gray, toggleQuietVersionWarnings)
+    y = y + 1
+    addButton("set_old", mx + 1, y, mw - 2, oldLabel, colors.black, state.allowOldClients and T().warn or colors.white, toggleOldClientCompat)
 
-    text(mx + 1, my + 10, trim("Buggy mode only accepts older protocol packets as best-effort.", mw - 2), colors.red, colors.lightGray)
-
+    text(mx + 1, my + mh - 2, trim("Tip: /security opens safety, privacy, trust, and backup tools.", mw - 2), colors.gray, colors.lightGray)
+    addButton("settings_sec", mx + 1, my + mh - 1, 10, "Security", colors.black, T().warn, openSecurityModal)
     addButton("settings_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
 
@@ -3396,6 +3897,7 @@ local function drawMainMenuModal()
         { "Auto Update", openUpdateModal, colors.lightGray, colors.black },
         { "Profile", function() state.modal = "profile" state.modalMode = "profile" state.modalInput = state.profile.display or state.username or "" end, colors.lightGray, colors.black },
         { "Settings", openSettingsModal, colors.lightGray, colors.black },
+        { "Security Center", openSecurityModal, T().warn, colors.black },
         { "App Controls", openAppControls, T().warn, colors.black },
         { "Close App", function() shutdownApp("exit") end, T().danger, colors.white }
     }
@@ -3600,6 +4102,51 @@ local function drawAppControlsModal()
     addButton("app_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
 
+
+local function drawSecurityModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 64, isPocket() and 18 or 20)
+    modalHeader(mx, my, mw, "Security center", "Privacy, trust, flood protection, and backups.")
+
+    local function onoff(v) return v and "ON" or "OFF" end
+    local y = my + 3
+
+    addButton("sec_dm", mx + 1, y, mw - 2, "DM privacy: " .. dmPrivacyLabel(), colors.black, state.dmPrivacy == "anyone" and colors.white or T().warn, cycleDmPrivacy)
+    y = y + 1
+    addButton("sec_history", mx + 1, y, mw - 2, "History sync friends-only: " .. onoff(state.requireFriendForHistory == true), colors.black, state.requireFriendForHistory and T().warn or colors.white, function()
+        toggleBoolSetting("requireFriendForHistory", "History sync friends-only")
+    end)
+    y = y + 1
+    addButton("sec_autojoin", mx + 1, y, mw - 2, "Auto-join public groups: " .. onoff(state.autoJoinPublicGroups ~= false), colors.black, state.autoJoinPublicGroups ~= false and T().good or colors.white, function()
+        toggleBoolSetting("autoJoinPublicGroups", "Auto-join public groups")
+    end)
+    y = y + 1
+    addButton("sec_flood", mx + 1, y, mw - 2, "Auto-block flood spam: " .. onoff(state.autoBlockFlood == true), colors.black, state.autoBlockFlood and T().warn or colors.white, function()
+        toggleBoolSetting("autoBlockFlood", "Auto-block flood spam")
+    end)
+    y = y + 1
+    addButton("sec_alerts", mx + 1, y, mw - 2, "Security alerts: " .. onoff(state.securityAlerts ~= false), colors.black, state.securityAlerts ~= false and T().good or colors.white, function()
+        toggleBoolSetting("securityAlerts", "Security alerts")
+    end)
+    y = y + 1
+
+    addButton("sec_audit", mx + 1, y, math.floor((mw - 3) / 2), "Run Audit", colors.black, T().accent, showSecurityAudit)
+    addButton("sec_backup", mx + 2 + math.floor((mw - 3) / 2), y, mw - 3 - math.floor((mw - 3) / 2), "Backup", colors.black, T().good, backupLocalData)
+    y = y + 2
+
+    text(mx + 1, y, "Recent security notes:", colors.black, colors.lightGray)
+    y = y + 1
+    if not state.securityEvents or #state.securityEvents == 0 then
+        text(mx + 1, y, "No security notes yet.", colors.gray, colors.lightGray)
+    else
+        local maxRows = math.max(1, mh - (y - my) - 2)
+        for i = 1, math.min(#state.securityEvents, maxRows) do
+            text(mx + 1, y + i - 1, trim("- " .. tostring(state.securityEvents[i].body or ""), mw - 2), colors.gray, colors.lightGray)
+        end
+    end
+
+    addButton("sec_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
+end
+
 local function drawErrorModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 44, 5)
 
@@ -3621,6 +4168,8 @@ local function drawModal()
         drawHelpModal()
     elseif state.modal == "settings" then
         drawSettingsModal()
+    elseif state.modal == "security" then
+        drawSecurityModal()
     elseif state.modal == "group_settings" then
         drawGroupSettingsModal()
     elseif state.modal == "group_rename" then
@@ -3910,7 +4459,9 @@ local QUIET_VERSION_KINDS = {
     discover_reply = true,
     history_request = true,
     history_reply = true,
-    read = true
+    read = true,
+    ping = true,
+    pong = true
 }
 
 local function shouldShowVersionNotice(msg)
@@ -3965,6 +4516,10 @@ end
 local function handleNetworkMessage(senderId, msg)
     if type(msg) ~= "table" then return end
     if msg.app ~= APP.name then return end
+    if packetByteSize(msg) > APP.maxPacketBytes then
+        recordSecurityEvent("Dropped oversized network packet.")
+        return
+    end
     if tonumber(msg.version) == nil then return end
     if not msg.user or not msg.publicId then return end
     if msg.publicId == state.publicId then return end
@@ -3987,6 +4542,10 @@ local function handleNetworkMessage(senderId, msg)
     end
 
     if state.blocked[msg.publicId] then return end
+    if rateLimited(msg.publicId, msg.kind) then return end
+    if isMuted(msg.publicId) and (msg.kind == "chat" or msg.kind == "pm" or msg.kind == "ping") then return end
+
+    recordIdentity(msg.publicId, msg)
 
     state.users[msg.publicId] = {
         username = msg.user,
@@ -4001,16 +4560,34 @@ local function handleNetworkMessage(senderId, msg)
         sendTo(senderId, "hello_ack", {
             current = state.current
         })
-        requestHistorySync(senderId, msg.publicId)
+        if state.autoHistorySync ~= false then requestHistorySync(senderId, msg.publicId) end
 
     elseif msg.kind == "hello_ack" then
-        requestHistorySync(senderId, msg.publicId)
+        if state.autoHistorySync ~= false then requestHistorySync(senderId, msg.publicId) end
         return
 
+    elseif msg.kind == "ping" then
+        if shouldAnswerPing(msg) then
+            if state.pingNotifications ~= false and msg.scope == "here" then
+                local c = state.convos[msg.key or ""] or { title = msg.title or msg.key or "here" }
+                systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " pinged @here in " .. chatLabel(c, true) .. ".")
+            elseif state.pingNotifications ~= false and msg.scope == "everyone" then
+                systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " pinged @everyone.")
+            end
+            sendTo(senderId, "pong", { pingId = msg.pingId, toPublicId = msg.publicId, scope = msg.scope, key = msg.key })
+        end
+
+    elseif msg.kind == "pong" then
+        receivePong(msg)
+
     elseif msg.kind == "history_request" then
-        sendTo(senderId, "history_reply", {
-            bundles = makeHistoryBundle(msg.keys or {}, msg.publicId)
-        })
+        if shouldShareHistoryWith(msg.publicId) then
+            sendTo(senderId, "history_reply", {
+                bundles = makeHistoryBundle(msg.keys or {}, msg.publicId)
+            })
+        elseif state.securityAlerts ~= false then
+            recordSecurityEvent("Blocked history sync request from non-friend #" .. shortId(msg.publicId) .. ".")
+        end
 
     elseif msg.kind == "history_reply" then
         local imported = importHistoryBundles(msg.bundles, msg.publicId)
@@ -4064,7 +4641,7 @@ local function handleNetworkMessage(senderId, msg)
     elseif msg.kind == "chat" then
         if msg.key and msg.body and not state.leftGroups[msg.key] then
             local known = state.convos[msg.key] ~= nil
-            local allowAuto = msg.key == "global" or (msg.listed ~= false and msg.private ~= true)
+            local allowAuto = msg.key == "global" or (state.autoJoinPublicGroups ~= false and msg.listed ~= false and msg.private ~= true)
 
             if known or allowAuto then
                 ensureConvo(msg.key, msg.title or msg.key, "public", msg.private or false, msg.listed ~= false, msg.user)
@@ -4094,6 +4671,12 @@ local function handleNetworkMessage(senderId, msg)
         end
 
         if intended and msg.body then
+            if not shouldAcceptDm(msg.publicId) then
+                if state.securityAlerts ~= false then
+                    recordSecurityEvent("Blocked DM from " .. displayName(msg.user, msg.publicId, msg.profile) .. " due to privacy setting.")
+                end
+                return
+            end
             local fromName = displayName(msg.user, msg.publicId, msg.profile)
             local key = pmKeyFor(msg.publicId, fromName)
 
@@ -4118,20 +4701,20 @@ local function handleNetworkMessage(senderId, msg)
             if not state.friendRequests.sent[msg.publicId] then
                 state.friendRequests.inbox[msg.publicId] = requestRecord(msg.publicId, state.users[msg.publicId], "incoming")
                 savePrefs()
-                systemMessage("Friend request from " .. displayName(msg.user, msg.publicId, msg.profile) .. ". Open People > Inbox.")
+                if state.friendNotifications ~= false then systemMessage("Friend request from " .. displayName(msg.user, msg.publicId, msg.profile) .. ". Open People > Inbox.") end
             else
                 addFriendDirect(msg.publicId, state.users[msg.publicId])
                 broadcast("friend_accept", {
                     toPublicId = msg.publicId
                 })
-                systemMessage("You and " .. displayName(msg.user, msg.publicId, msg.profile) .. " are now friends.")
+                if state.friendNotifications ~= false then systemMessage("You and " .. displayName(msg.user, msg.publicId, msg.profile) .. " are now friends.") end
             end
         end
 
     elseif msg.kind == "friend_accept" then
         if msg.toPublicId == state.publicId then
             addFriendDirect(msg.publicId, state.users[msg.publicId])
-            systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " accepted your friend request.")
+            if state.friendNotifications ~= false then systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " accepted your friend request.") end
         end
 
     elseif msg.kind == "friend_decline" then
@@ -4182,6 +4765,8 @@ local function networkLoop()
             })
             lastHello = os.clock()
         end
+
+        checkPingTimeouts()
 
         local senderId, msg = rednet.receive(APP.protocol, 0.1)
 

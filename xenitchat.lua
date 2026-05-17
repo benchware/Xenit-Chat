@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "19.2.0",
+    version = "19.2.1",
     protocolVersion = 19,
     protocolName = "Obsidian",
     protocol = "xenitchat_bus",
@@ -234,6 +234,11 @@ local state = {
     pinned = {},
     quietVersionWarnings = true,
     allowOldClients = false,
+    legacyCompatMode = "off",
+    modalPositions = {},
+    draggingModal = nil,
+    showOldClientTags = true,
+    suppressRemoteVersionWarnings = true,
     showTimestamps = true,
     compactMessages = false,
     showReadReceipts = true,
@@ -614,6 +619,52 @@ local function sameProtocolVersion(value)
     return tonumber(value) == protocolVersion()
 end
 
+LEGACY_COMPAT_MODES = {
+    off = { label = "Off", target = nil, plain = false, accept = false },
+    accept = { label = "Accept old packets only", target = nil, plain = false, accept = true },
+    v7 = { label = "Classic v7 mirror (BUGGY)", target = 7, plain = true, accept = true },
+    v19_plain = { label = "v19 plain/no codename (BUGGY)", target = 19, plain = true, accept = true }
+}
+
+LEGACY_COMPAT_ORDER = { "off", "accept", "v7", "v19_plain" }
+
+function legacyCompatInfo()
+    return LEGACY_COMPAT_MODES[state.legacyCompatMode or "accept"] or LEGACY_COMPAT_MODES.accept
+end
+
+function legacyCompatLabel()
+    local info = legacyCompatInfo()
+    return info.label or "Accept old packets only"
+end
+
+function legacyMirrorVersion()
+    local info = legacyCompatInfo()
+    return info.target
+end
+
+function shouldAcceptOldClients()
+    local info = legacyCompatInfo()
+    return (state.allowOldClients == true or state.legacyCompatMode ~= "off") and info.accept == true
+end
+
+function shouldMirrorForLegacy(kind)
+    local v = legacyMirrorVersion()
+    if not v then return false end
+    if v == protocolVersion() and state.legacyCompatMode ~= "v19_plain" then return false end
+    return kind == "hello" or kind == "hello_ack" or kind == "chat" or kind == "pm" or kind == "read" or kind == "channel_create" or kind == "channel_rename" or kind == "join" or kind == "friend_request" or kind == "friend_accept" or kind == "friend_decline" or kind == "friend_cancel" or kind == "unfriend"
+end
+
+function remoteIsOld(publicIdOrUser)
+    local u = nil
+    if type(publicIdOrUser) == "table" then
+        u = publicIdOrUser
+    else
+        u = state.users and state.users[publicIdOrUser]
+    end
+    local rv = u and tonumber(u.remoteVersion or u.version)
+    return rv ~= nil and rv < protocolVersion()
+end
+
 local function getNodeSecret()
     local existing = readText(APP.nodeSecretFile)
 
@@ -728,6 +779,9 @@ local function defaultPrefs()
         pinned = {},
         quietVersionWarnings = true,
         allowOldClients = false,
+        legacyCompatMode = "off",
+        showOldClientTags = true,
+        suppressRemoteVersionWarnings = true,
         showTimestamps = true,
         compactMessages = false,
         showReadReceipts = true,
@@ -772,6 +826,9 @@ local function savePrefs()
         pinned = state.pinned,
         quietVersionWarnings = state.quietVersionWarnings,
         allowOldClients = state.allowOldClients,
+        legacyCompatMode = state.legacyCompatMode,
+        showOldClientTags = state.showOldClientTags,
+        suppressRemoteVersionWarnings = state.suppressRemoteVersionWarnings,
         showTimestamps = state.showTimestamps,
         compactMessages = state.compactMessages,
         showReadReceipts = state.showReadReceipts,
@@ -808,6 +865,9 @@ local function loadPrefs()
     if type(data.pinned) ~= "table" then data.pinned = {} end
     if type(data.quietVersionWarnings) ~= "boolean" then data.quietVersionWarnings = true end
     if type(data.allowOldClients) ~= "boolean" then data.allowOldClients = false end
+    if data.legacyCompatMode ~= "accept" and data.legacyCompatMode ~= "v7" and data.legacyCompatMode ~= "v19_plain" and data.legacyCompatMode ~= "off" then data.legacyCompatMode = data.allowOldClients and "accept" or "off" end
+    if type(data.showOldClientTags) ~= "boolean" then data.showOldClientTags = true end
+    if type(data.suppressRemoteVersionWarnings) ~= "boolean" then data.suppressRemoteVersionWarnings = true end
     if type(data.showTimestamps) ~= "boolean" then data.showTimestamps = true end
     if type(data.compactMessages) ~= "boolean" then data.compactMessages = false end
     if type(data.showReadReceipts) ~= "boolean" then data.showReadReceipts = true end
@@ -836,6 +896,9 @@ local function loadPrefs()
     state.pinned = data.pinned
     state.quietVersionWarnings = data.quietVersionWarnings
     state.allowOldClients = data.allowOldClients
+    state.legacyCompatMode = data.legacyCompatMode
+    state.showOldClientTags = data.showOldClientTags
+    state.suppressRemoteVersionWarnings = data.suppressRemoteVersionWarnings
     state.showTimestamps = data.showTimestamps
     state.compactMessages = data.compactMessages
     state.showReadReceipts = data.showReadReceipts
@@ -1259,7 +1322,7 @@ local function requestHistorySync(senderId, publicId)
 
     state.historySyncLast[publicId] = now
 
-    sendTo(senderId, "history_request", {
+    safeSendTo(senderId, "history_request", {
         keys = historyKeysForPeer(publicId)
     })
 end
@@ -1489,6 +1552,10 @@ local function displayName(username, publicId, profile)
         end
     end
 
+    if state.showOldClientTags ~= false and publicId and remoteIsOld(publicId) then
+        base = base .. " [OLD]"
+    end
+
     if duplicate > 1 then
         return base .. "#" .. shortId(publicId)
     end
@@ -1704,32 +1771,67 @@ local function myName()
     return state.username or "guest"
 end
 
-local function makePacket(kind, data)
+local function makePacket(kind, data, legacyVersion, plainLegacy)
     data = data or {}
 
     data.app = APP.name
-    data.version = protocolVersion()
-    data.appVersion = appVersion()
-    data.protocolName = protocolName()
+    data.version = tonumber(legacyVersion) or protocolVersion()
+    if not plainLegacy then
+        data.appVersion = appVersion()
+        data.protocolName = protocolName()
+    else
+        data.appVersion = nil
+        data.protocolName = nil
+    end
     data.kind = kind
     data.user = state.username
     data.publicId = state.publicId
     data.nodeId = os.getComputerID()
     data.profile = state.profile
     data.time = os.time()
-    data.packetId = randomToken(12)
+    data.packetId = data.packetId or randomToken(12)
 
     return data
+end
+
+function makeLegacyPacket(kind, data)
+    local target = legacyMirrorVersion()
+    if not target then return nil end
+    local copy = {}
+    for k, v in pairs(data or {}) do copy[k] = v end
+    copy.compatMirror = true
+    copy.sourceProtocolVersion = protocolVersion()
+    copy.sourceAppVersion = appVersion()
+    local plain = legacyCompatInfo().plain == true
+    return makePacket(kind, copy, target, plain)
 end
 
 local function broadcast(kind, data)
     if not state.username or not state.publicId then return end
     rednet.broadcast(makePacket(kind, data), APP.protocol)
+    if shouldMirrorForLegacy(kind) then
+        local legacy = makeLegacyPacket(kind, data)
+        if legacy then rednet.broadcast(legacy, APP.protocol) end
+    end
 end
 
 sendTo = function(id, kind, data)
     if not state.username or not state.publicId then return end
     rednet.send(id, makePacket(kind, data), APP.protocol)
+    if shouldMirrorForLegacy(kind) then
+        local legacy = makeLegacyPacket(kind, data)
+        if legacy then rednet.send(id, legacy, APP.protocol) end
+    end
+end
+
+function safeSendTo(id, kind, data)
+    if type(sendTo) == "function" then
+        return sendTo(id, kind, data)
+    end
+    if not state.username or not state.publicId then return end
+    if rednet and rednet.send then
+        return rednet.send(id, makePacket(kind, data), APP.protocol)
+    end
 end
 
 
@@ -2106,16 +2208,31 @@ end
 
 local function toggleOldClientCompat()
     state.allowOldClients = not state.allowOldClients
-    savePrefs()
-    if state.allowOldClients then
-        systemMessage("Talk to older clients: ON (BUGGY). Some messages may duplicate, miss fields, or render weirdly.")
-    else
-        systemMessage("Talk to older clients: OFF. Only matching protocol clients are accepted.")
+    if state.allowOldClients and (state.legacyCompatMode == "off" or not state.legacyCompatMode) then
+        state.legacyCompatMode = "accept"
+    elseif not state.allowOldClients then
+        state.legacyCompatMode = "off"
     end
+    savePrefs()
+    systemMessage("Talk to older clients: " .. (shouldAcceptOldClients() and (legacyCompatLabel() .. " (BUGGY)") or "OFF") .. ".")
+end
+
+function cycleLegacyCompatMode()
+    local current = state.legacyCompatMode or "accept"
+    local pos = 1
+    for i, key in ipairs(LEGACY_COMPAT_ORDER) do
+        if key == current then pos = i break end
+    end
+    pos = pos + 1
+    if pos > #LEGACY_COMPAT_ORDER then pos = 1 end
+    state.legacyCompatMode = LEGACY_COMPAT_ORDER[pos]
+    state.allowOldClients = state.legacyCompatMode ~= "off"
+    savePrefs()
+    systemMessage("Old-client compatibility: " .. legacyCompatLabel() .. (state.allowOldClients and " (BUGGY)." or "."))
 end
 
 local function showVersionInfo()
-    systemMessage("XenitChat v" .. appVersion() .. " | Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()) .. " | Older clients: " .. (state.allowOldClients and "ON (BUGGY)" or "OFF"))
+    systemMessage("XenitChat v" .. appVersion() .. " | Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()) .. " | old-client mode: " .. legacyCompatLabel())
 end
 
 
@@ -2167,7 +2284,7 @@ function sendPing(targetText)
         local name = displayName(user.username, publicId, user.profile)
         rememberPing(id, publicId, name, "user", nil)
         local payload = { pingId = id, toPublicId = publicId, scope = "user" }
-        if user.senderId then sendTo(user.senderId, "ping", payload) else broadcast("ping", payload) end
+        if user.senderId then safeSendTo(user.senderId, "ping", payload) else broadcast("ping", payload) end
         systemMessage("Pinging " .. name .. "...")
         return
     end
@@ -2394,6 +2511,23 @@ function showSecurityAudit()
     systemMessage("History sharing requires friends: " .. ((state.requireFriendForHistory and "ON") or "OFF") .. " | Auto-block flood: " .. ((state.autoBlockFlood and "ON") or "OFF"))
 end
 
+function showPeerStatus()
+    local list = getSortedUsers()
+    if #list == 0 then
+        systemMessage("No P2P peers online yet. Try /ping @everyone or wait for hello packets.")
+        return
+    end
+    systemMessage("P2P peers: " .. tostring(#list) .. " online/known | compatibility: " .. legacyCompatLabel())
+    for i = 1, math.min(#list, 8) do
+        local u = list[i]
+        local info = state.users[u.publicId] or u
+        local rv = tostring(info.remoteAppVersion or info.remoteVersion or "?")
+        local rp = tostring(info.remoteProtocolName or "no-codename")
+        systemMessage(" - " .. displayName(info.username, u.publicId, info.profile) .. " | v" .. rv .. " | " .. rp .. " | id #" .. shortId(u.publicId))
+    end
+    if #list > 8 then systemMessage("...and " .. tostring(#list - 8) .. " more peer(s).") end
+end
+
 function backupLocalData()
     local suffix = tostring(os.getComputerID()) .. "_" .. tostring(os.time())
     local base = ".xenit_backup_" .. suffix
@@ -2431,6 +2565,7 @@ COMMAND_HELP = {
             { cmd = "/untrust", args = "@name-or-id", desc = "Remove a trusted user." },
             { cmd = "/safety", args = "@name-or-id", desc = "Show a user safety code." },
             { cmd = "/who", desc = "List online users.", aliases = {"/online"} },
+            { cmd = "/peers", desc = "Show P2P peer versions, old tags, and sender IDs.", aliases = {"/net", "/network"} },
             { cmd = "/ping", args = "[@user|@here|@everyone]", desc = "Check latency to a user, current chat, or everyone." },
             { cmd = "/id", desc = "Show your short ID.", aliases = {"/myid"} }
         }
@@ -2462,7 +2597,7 @@ COMMAND_HELP = {
             { cmd = "/sync", desc = "Request chat history sync.", aliases = {"/history"} },
             { cmd = "/update", args = "[check|install|force]", desc = "Check or install GitHub update." },
             { cmd = "/version", desc = "Show app/protocol version.", aliases = {"/about"} },
-            { cmd = "/compat", desc = "Toggle older-client mode. BUGGY.", aliases = {"/legacy", "/oldclients"} },
+            { cmd = "/compat", desc = "Cycle old-client compatibility dropdown. BUGGY.", aliases = {"/legacy", "/oldclients"} },
             { cmd = "/quiet", desc = "Toggle version warning noise filter." },
             { cmd = "/privacy", desc = "Cycle DM privacy: anyone, friends-only, no DMs." },
             { cmd = "/audit", desc = "Run a quick security audit." },
@@ -2596,6 +2731,8 @@ local function handleSlashCommand(body)
         end
     elseif command == "who" or command == "online" then
         listOnlineUsers()
+    elseif command == "peers" or command == "net" or command == "network" then
+        showPeerStatus()
     elseif command == "id" or command == "myid" then
         showMyId()
     elseif command == "read" or command == "readall" then
@@ -2605,7 +2742,7 @@ local function handleSlashCommand(body)
     elseif command == "quiet" then
         toggleQuietVersionWarnings()
     elseif command == "compat" or command == "legacy" or command == "oldclients" then
-        toggleOldClientCompat()
+        cycleLegacyCompatMode()
     elseif command == "audit" then
         showSecurityAudit()
     elseif command == "backup" then
@@ -3248,7 +3385,7 @@ local function modalDivider(mx, y, mw)
     end
 end
 
-local function modalBox(width, height)
+local function modalBox(width, height, modalKey)
     local marginX = w <= 30 and 0 or 2
     local marginY = h <= 14 and 0 or 1
     local maxW = math.max(1, w - marginX * 2)
@@ -3265,6 +3402,18 @@ local function modalBox(width, height)
 
     local mx = math.floor((w - mw) / 2) + 1
     local my = math.floor((h - mh) / 2) + 1
+
+    if modalKey then
+        state.modalPositions = state.modalPositions or {}
+        local pos = state.modalPositions[modalKey]
+        if type(pos) == "table" then
+            mx = math.max(1, math.min(pos.x or mx, w - mw + 1))
+            my = math.max(1, math.min(pos.y or my, h - mh + 1))
+        else
+            state.modalPositions[modalKey] = { x = mx, y = my }
+        end
+        state.activeModalBox = { key = modalKey, x = mx, y = my, w = mw, h = mh }
+    end
 
     fill(mx, my, mw, mh, colors.lightGray)
 
@@ -3803,11 +3952,19 @@ local function drawSettingsModal()
     y = y + 1
 
     local quietLabel = state.quietVersionWarnings and "Quiet version spam: ON" or "Quiet version spam: OFF"
-    local oldLabel = state.allowOldClients and "Talk to older clients: ON (BUGGY)" or "Talk to older clients: OFF"
+    local oldLabel = "Old-client mode: " .. legacyCompatLabel()
 
     addButton("set_quiet", mx + 1, y, mw - 2, quietLabel, colors.black, state.quietVersionWarnings and T().good or colors.gray, toggleQuietVersionWarnings)
     y = y + 1
-    addButton("set_old", mx + 1, y, mw - 2, oldLabel, colors.black, state.allowOldClients and T().warn or colors.white, toggleOldClientCompat)
+    addButton("set_old", mx + 1, y, mw - 2, oldLabel, colors.black, shouldAcceptOldClients() and T().warn or colors.white, cycleLegacyCompatMode)
+    y = y + 1
+    addButton("set_oldtag", mx + 1, y, mw - 2, "Show [OLD] tags: " .. onoff(state.showOldClientTags ~= false), colors.black, state.showOldClientTags ~= false and T().good or colors.white, function()
+        toggleBoolSetting("showOldClientTags", "Show [OLD] tags")
+    end)
+    y = y + 1
+    addButton("set_rwarn", mx + 1, y, mw - 2, "Hide remote version-warning echoes: " .. onoff(state.suppressRemoteVersionWarnings ~= false), colors.black, state.suppressRemoteVersionWarnings ~= false and T().good or colors.white, function()
+        toggleBoolSetting("suppressRemoteVersionWarnings", "Hide remote version-warning echoes")
+    end)
 
     text(mx + 1, my + mh - 2, trim("Tip: /security opens safety, privacy, trust, and backup tools.", mw - 2), colors.gray, colors.lightGray)
     addButton("settings_sec", mx + 1, my + mh - 1, 10, "Security", colors.black, T().warn, openSecurityModal)
@@ -3872,13 +4029,14 @@ local function drawGroupRenameModal()
 end
 
 local function drawMainMenuModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 44, isPocket() and 14 or 15)
+    local mx, my, mw, mh = modalBox(isPocket() and w or 44, isPocket() and 14 or 15, "main_menu")
 
-    modalHeader(mx, my, mw, "Menu", trim(currentChatTitle() .. "  |  /help", mw - 2))
+    modalHeader(mx, my, mw, "Menu", trim(currentChatTitle() .. "  |  /help  |  drag title", mw - 2))
 
     local items = {
         { "Chats", openChatsModal, T().good, colors.black },
         { "People", function() state.modal = "people" end, T().warn, colors.black },
+        { "P2P Peers", function() state.modal = nil showPeerStatus() end, T().accent, colors.black },
         { "Friend Inbox", function() state.modal = "friend_inbox" end, T().accent, colors.black },
         { "Discover Groups", requestDiscovery, T().accent, colors.black },
         { "New Group", function() state.modal = "create" state.modalInput = "" state.modalMode = "public" end, T().good, colors.black },
@@ -4487,10 +4645,19 @@ local function versionNotice(msg)
     local who = displayName(msg.user, msg.publicId, msg.profile)
 
     if tonumber(msg.version) > protocolVersion() then
-        addMessage("global", "system", who .. " is on newer XenitChat v" .. tostring(msg.appVersion or msg.version) .. " (" .. tostring(msg.protocolName or "unknown") .. "). Run /update install if messages do not work.", "warn", { silent = true })
+        addMessage(state.current or "global", "system", who .. " is on newer XenitChat v" .. tostring(msg.appVersion or msg.version) .. " (" .. tostring(msg.protocolName or "unknown") .. "). Run /update install if messages do not work.", "warn", { silent = true })
     elseif tonumber(msg.version) < protocolVersion() then
-        addMessage("global", "system", "Ignored an old-format " .. tostring(msg.kind or "packet") .. " from " .. who .. " (v" .. tostring(msg.appVersion or msg.version) .. ", " .. tostring(msg.protocolName or "unknown") .. "). Enable Settings > Talk to older clients (BUGGY) to accept it.", "warn", { silent = true })
+        addMessage(state.current or "global", "system", "Ignored an old-format " .. tostring(msg.kind or "packet") .. " from " .. who .. " (v" .. tostring(msg.appVersion or msg.version) .. ", " .. tostring(msg.protocolName or "unknown") .. "). Enable Settings > Talk to older clients (BUGGY) to accept it.", "warn", { silent = true })
     end
+end
+
+
+function isRemoteVersionWarningBody(body)
+    local s = tostring(body or ""):lower()
+    return s:find("your version is outdated", 1, true) ~= nil
+        or s:find("message from old xenitchat version ignored", 1, true) ~= nil
+        or s:find("is on newer xenitchat", 1, true) ~= nil
+        or s:find("ignored an old%-format") ~= nil
 end
 
 local function rememberPacket(msg)
@@ -4524,12 +4691,16 @@ local function handleNetworkMessage(senderId, msg)
     if not msg.user or not msg.publicId then return end
     if msg.publicId == state.publicId then return end
 
+    if msg.compatMirror and tonumber(msg.sourceProtocolVersion or 0) >= protocolVersion() then
+        return
+    end
+
     if rememberPacket(msg) then return end
 
     if not sameProtocolVersion(msg.version) then
         local remoteVersion = tonumber(msg.version)
 
-        if remoteVersion and remoteVersion < protocolVersion() and state.allowOldClients then
+        if remoteVersion and remoteVersion < protocolVersion() and shouldAcceptOldClients() then
             -- Best-effort compatibility mode. Marked buggy because old clients may
             -- use missing fields, older message formats, or noisier packet flows.
         elseif QUIET_VERSION_KINDS[msg.kind] then
@@ -4553,11 +4724,15 @@ local function handleNetworkMessage(senderId, msg)
         nodeId = msg.nodeId,
         senderId = senderId,
         profile = msg.profile or {},
+        remoteVersion = tonumber(msg.version),
+        remoteAppVersion = msg.appVersion or tostring(msg.version),
+        remoteProtocolName = msg.protocolName,
+        legacyMirror = msg.compatMirror == true,
         lastSeenClock = os.clock()
     }
 
     if msg.kind == "hello" then
-        sendTo(senderId, "hello_ack", {
+        safeSendTo(senderId, "hello_ack", {
             current = state.current
         })
         if state.autoHistorySync ~= false then requestHistorySync(senderId, msg.publicId) end
@@ -4574,7 +4749,7 @@ local function handleNetworkMessage(senderId, msg)
             elseif state.pingNotifications ~= false and msg.scope == "everyone" then
                 systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " pinged @everyone.")
             end
-            sendTo(senderId, "pong", { pingId = msg.pingId, toPublicId = msg.publicId, scope = msg.scope, key = msg.key })
+            safeSendTo(senderId, "pong", { pingId = msg.pingId, toPublicId = msg.publicId, scope = msg.scope, key = msg.key })
         end
 
     elseif msg.kind == "pong" then
@@ -4582,7 +4757,7 @@ local function handleNetworkMessage(senderId, msg)
 
     elseif msg.kind == "history_request" then
         if shouldShareHistoryWith(msg.publicId) then
-            sendTo(senderId, "history_reply", {
+            safeSendTo(senderId, "history_reply", {
                 bundles = makeHistoryBundle(msg.keys or {}, msg.publicId)
             })
         elseif state.securityAlerts ~= false then
@@ -4608,7 +4783,7 @@ local function handleNetworkMessage(senderId, msg)
             end
         end
 
-        sendTo(senderId, "discover_reply", {
+        safeSendTo(senderId, "discover_reply", {
             channels = channels
         })
 
@@ -4639,6 +4814,9 @@ local function handleNetworkMessage(senderId, msg)
         return
 
     elseif msg.kind == "chat" then
+        if state.suppressRemoteVersionWarnings ~= false and isRemoteVersionWarningBody(msg.body) then
+            return
+        end
         if msg.key and msg.body and not state.leftGroups[msg.key] then
             local known = state.convos[msg.key] ~= nil
             local allowAuto = msg.key == "global" or (state.autoJoinPublicGroups ~= false and msg.listed ~= false and msg.private ~= true)
@@ -4926,8 +5104,33 @@ local function handleKey(key)
     end
 end
 
+
+function beginModalDrag(x, y)
+    if state.modal ~= "main_menu" then return false end
+    local b = state.activeModalBox
+    if not b or b.key ~= "main_menu" then return false end
+    if y == b.y and x >= b.x and x <= b.x + b.w - 1 and x < b.x + b.w - 3 then
+        state.draggingModal = { key = "main_menu", dx = x - b.x, dy = y - b.y }
+        return true
+    end
+    return false
+end
+
+function handleMouseDrag(x, y)
+    local d = state.draggingModal
+    if not d then return end
+    local b = state.activeModalBox
+    if not b then return end
+    state.modalPositions = state.modalPositions or {}
+    state.modalPositions[d.key] = {
+        x = math.max(1, math.min(x - (d.dx or 0), w - b.w + 1)),
+        y = math.max(1, math.min(y - (d.dy or 0), h - b.h + 1))
+    }
+end
+
 local function handleMouse(x, y)
     if clickButton(x, y) then return end
+    if beginModalDrag(x, y) then return end
 
     if state.screen == "login" or state.screen == "register" then
         if isPocket() then
@@ -4975,6 +5178,12 @@ local function uiLoop()
 
         elseif event == "mouse_click" then
             handleMouse(p2, p3)
+
+        elseif event == "mouse_drag" then
+            handleMouseDrag(p2, p3)
+
+        elseif event == "mouse_up" then
+            state.draggingModal = nil
 
         elseif event == "mouse_scroll" then
             if state.screen == "chat" and not state.modal then

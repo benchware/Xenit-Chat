@@ -4,7 +4,9 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = 16,
+    version = "19.1.9",
+    protocolVersion = 19,
+    protocolName = "Quartz",
     protocol = "xenitchat_bus",
     updateUrl = "https://raw.githubusercontent.com/benchware/Xenit-Chat/main/xenitchat.lua",
 
@@ -72,6 +74,90 @@ local THEMES = {
         muted = colors.lightGray,
         input = colors.black,
         inputText = colors.white
+    },
+    neon = {
+        name = "Neon",
+        bg = colors.black,
+        panel = colors.purple,
+        top = colors.magenta,
+        accent = colors.cyan,
+        good = colors.lime,
+        warn = colors.yellow,
+        danger = colors.red,
+        text = colors.white,
+        muted = colors.lightGray,
+        input = colors.black,
+        inputText = colors.white
+    },
+    graphite = {
+        name = "Graphite",
+        bg = colors.black,
+        panel = colors.gray,
+        top = colors.gray,
+        accent = colors.orange,
+        good = colors.lime,
+        warn = colors.yellow,
+        danger = colors.red,
+        text = colors.white,
+        muted = colors.lightGray,
+        input = colors.black,
+        inputText = colors.white
+    },
+    forest = {
+        name = "Forest",
+        bg = colors.black,
+        panel = colors.green,
+        top = colors.green,
+        accent = colors.lime,
+        good = colors.lime,
+        warn = colors.orange,
+        danger = colors.red,
+        text = colors.white,
+        muted = colors.lightGray,
+        input = colors.black,
+        inputText = colors.white
+    },
+    sunset = {
+        name = "Sunset",
+        bg = colors.black,
+        panel = colors.brown,
+        top = colors.orange,
+        accent = colors.yellow,
+        good = colors.lime,
+        warn = colors.orange,
+        danger = colors.red,
+        text = colors.white,
+        muted = colors.lightGray,
+        input = colors.black,
+        inputText = colors.white
+    },
+    amethyst = {
+        name = "Amethyst",
+        bg = colors.black,
+        panel = colors.purple,
+        top = colors.purple,
+        accent = colors.magenta,
+        good = colors.lime,
+        warn = colors.yellow,
+        danger = colors.red,
+        text = colors.white,
+        muted = colors.lightGray,
+        input = colors.black,
+        inputText = colors.white
+    },
+    ice = {
+        name = "Ice",
+        bg = colors.white,
+        panel = colors.lightBlue,
+        top = colors.cyan,
+        accent = colors.blue,
+        good = colors.green,
+        warn = colors.orange,
+        danger = colors.red,
+        text = colors.black,
+        muted = colors.gray,
+        input = colors.white,
+        inputText = colors.black
     },
     clean = {
         name = "Clean",
@@ -144,6 +230,9 @@ local state = {
     versionNoticeLast = {},
     pinned = {},
     quietVersionWarnings = true,
+    allowOldClients = false,
+    restartRequested = false,
+    exitReason = nil,
     profile = {
         display = "",
         status = "Available"
@@ -459,6 +548,50 @@ local function shortId(id)
     return id:sub(1, 6)
 end
 
+local function appVersion()
+    return tostring(APP.version or APP.protocolVersion or "0")
+end
+
+local function protocolName()
+    return tostring(APP.protocolName or "Unknown")
+end
+
+local function protocolVersion()
+    return tonumber(APP.protocolVersion or APP.version) or 0
+end
+
+local function parseVersionParts(value)
+    local parts = {}
+    value = tostring(value or "0")
+
+    for part in value:gmatch("%d+") do
+        table.insert(parts, tonumber(part) or 0)
+    end
+
+    if #parts == 0 then parts[1] = 0 end
+    return parts
+end
+
+local function compareVersions(a, b)
+    local aa = parseVersionParts(a)
+    local bb = parseVersionParts(b)
+    local max = math.max(#aa, #bb)
+
+    for i = 1, max do
+        local av = aa[i] or 0
+        local bv = bb[i] or 0
+
+        if av < bv then return -1 end
+        if av > bv then return 1 end
+    end
+
+    return 0
+end
+
+local function sameProtocolVersion(value)
+    return tonumber(value) == protocolVersion()
+end
+
 local function getNodeSecret()
     local existing = readText(APP.nodeSecretFile)
 
@@ -572,6 +705,7 @@ local function defaultPrefs()
         leftGroups = {},
         pinned = {},
         quietVersionWarnings = true,
+        allowOldClients = false,
         convos = {
             global = {
                 key = "global",
@@ -600,6 +734,7 @@ local function savePrefs()
         leftGroups = state.leftGroups,
         pinned = state.pinned,
         quietVersionWarnings = state.quietVersionWarnings,
+        allowOldClients = state.allowOldClients,
         convos = state.convos
     }
 
@@ -620,6 +755,7 @@ local function loadPrefs()
     if type(data.leftGroups) ~= "table" then data.leftGroups = {} end
     if type(data.pinned) ~= "table" then data.pinned = {} end
     if type(data.quietVersionWarnings) ~= "boolean" then data.quietVersionWarnings = true end
+    if type(data.allowOldClients) ~= "boolean" then data.allowOldClients = false end
     if type(data.profile) ~= "table" then data.profile = { display = "", status = "Available" } end
 
     state.remember = data.remember ~= false
@@ -632,6 +768,7 @@ local function loadPrefs()
     state.leftGroups = data.leftGroups
     state.pinned = data.pinned
     state.quietVersionWarnings = data.quietVersionWarnings
+    state.allowOldClients = data.allowOldClients
     state.convos = data.convos
 
     if not state.convos.global then
@@ -843,7 +980,7 @@ end
 
 saveHistory = function()
     local data = {
-        version = APP.version,
+        version = appVersion(),
         savedAt = os.time(),
         messages = {},
         convos = {}
@@ -1481,7 +1618,9 @@ local function makePacket(kind, data)
     data = data or {}
 
     data.app = APP.name
-    data.version = APP.version
+    data.version = protocolVersion()
+    data.appVersion = appVersion()
+    data.protocolName = protocolName()
     data.kind = kind
     data.user = state.username
     data.publicId = state.publicId
@@ -1538,8 +1677,13 @@ local function httpRead(url)
 end
 
 local function parseRemoteVersion(raw)
-    local found = raw:match("version%s*=%s*(%d+)")
-    return tonumber(found)
+    local quoted = raw:match("version%s*=%s*([\"'])([%w%.%-_]+)%1")
+    if quoted then return quoted end
+
+    local numeric = raw:match("version%s*=%s*(%d+[%d%.]*)")
+    if numeric then return numeric end
+
+    return nil
 end
 
 local function validateUpdate(raw)
@@ -1559,9 +1703,10 @@ local function validateUpdate(raw)
     return true, nil
 end
 
-local function installUpdate(raw, remoteVersion)
+local function installUpdate(raw, remoteVersion, targetKey)
     local path = getProgramPath()
     local backup = path .. ".bak"
+    targetKey = targetKey or state.current or "global"
 
     if fs.exists(path) then
         local current = readText(path) or ""
@@ -1569,53 +1714,55 @@ local function installUpdate(raw, remoteVersion)
     end
 
     writeText(path, raw)
-    systemMessage("Updated XenitChat to v" .. tostring(remoteVersion) .. ". Restart the script to use it.", "global")
-    systemMessage("Backup saved as " .. backup, "global")
+    systemMessage("Updated XenitChat to v" .. tostring(remoteVersion) .. ". Restart the script to use it.", targetKey)
+    systemMessage("Backup saved as " .. backup, targetKey)
 end
 
-local function checkForUpdate(auto, install, force)
+local function checkForUpdate(auto, install, force, targetKey)
+    targetKey = targetKey or state.current or "global"
+
     if state.updateBusy then
-        if not auto then systemMessage("Update check already running.", "global") end
+        if not auto then systemMessage("Update check already running.", targetKey) end
         return
     end
 
     state.updateBusy = true
 
     if not auto then
-        systemMessage("Checking GitHub for updates...", "global")
+        systemMessage("Checking GitHub for updates...", targetKey)
     end
 
     local raw, err = httpRead(APP.updateUrl)
     if not raw then
-        if not auto then systemMessage("Update failed: " .. tostring(err), "global") end
+        if not auto then systemMessage("Update failed: " .. tostring(err), targetKey) end
         state.updateBusy = false
         return
     end
 
     local remoteVersion = parseRemoteVersion(raw)
     if not remoteVersion then
-        if not auto then systemMessage("Update failed: could not read remote version.", "global") end
+        if not auto then systemMessage("Update failed: could not read remote version.", targetKey) end
         state.updateBusy = false
         return
     end
 
-    if remoteVersion <= APP.version and not force then
-        if not auto then systemMessage("Already up to date. Local v" .. APP.version .. ", GitHub v" .. remoteVersion .. ".", "global") end
+    if compareVersions(remoteVersion, appVersion()) <= 0 and not force then
+        if not auto then systemMessage("Already up to date. Local v" .. appVersion() .. ", GitHub v" .. tostring(remoteVersion) .. ".", targetKey) end
         state.updateBusy = false
         return
     end
 
     local ok, reason = validateUpdate(raw)
     if not ok then
-        systemMessage("Update blocked: " .. tostring(reason), "global")
+        systemMessage("Update blocked: " .. tostring(reason), targetKey)
         state.updateBusy = false
         return
     end
 
     if install then
-        installUpdate(raw, remoteVersion)
+        installUpdate(raw, remoteVersion, targetKey)
     else
-        systemMessage("Update available: v" .. tostring(remoteVersion) .. " on GitHub. Type /update install.", "global")
+        systemMessage("Update available: v" .. tostring(remoteVersion) .. " on GitHub. Type /update install.", targetKey)
     end
 
     state.updateBusy = false
@@ -1798,6 +1945,8 @@ local sendFriendRequest
 local blockUser
 local unblockUser
 local logout
+local shutdownApp
+local openAppControls
 
 local function markAllRead()
     for _, c in pairs(state.convos or {}) do
@@ -1856,13 +2005,33 @@ local function resolveBlocked(value)
 end
 
 local function showMyId()
-    systemMessage("Your ID: " .. shortId(state.publicId) .. "  (use this for friend/DM search)")
+    systemMessage("Your ID: " .. shortId(state.publicId) .. "  | Protocol " .. protocolName() .. "/" .. tostring(protocolVersion()))
 end
 
 local function toggleQuietVersionWarnings()
     state.quietVersionWarnings = not state.quietVersionWarnings
     savePrefs()
     systemMessage("Version warning noise filter: " .. (state.quietVersionWarnings and "ON" or "OFF") .. ".")
+end
+
+local function toggleOldClientCompat()
+    state.allowOldClients = not state.allowOldClients
+    savePrefs()
+    if state.allowOldClients then
+        systemMessage("Talk to older clients: ON (BUGGY). Some messages may duplicate, miss fields, or render weirdly.")
+    else
+        systemMessage("Talk to older clients: OFF. Only matching protocol clients are accepted.")
+    end
+end
+
+local function showVersionInfo()
+    systemMessage("XenitChat v" .. appVersion() .. " | Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()) .. " | Older clients: " .. (state.allowOldClients and "ON (BUGGY)" or "OFF"))
+end
+
+local function openSettingsModal()
+    state.modal = "settings"
+    state.modalInput = ""
+    state.modalData = nil
 end
 
 local function handleSlashCommand(body)
@@ -1888,16 +2057,18 @@ local function handleSlashCommand(body)
         state.modal = "friend_inbox"
     elseif command == "theme" then
         state.modal = "theme"
+    elseif command == "settings" or command == "prefs" then
+        openSettingsModal()
     elseif command == "discover" or command == "d" then
         requestDiscovery()
     elseif command == "update" then
         local mode = rest:lower()
         if mode == "install" or mode == "now" then
-            checkForUpdate(false, true, false)
+            checkForUpdate(false, true, false, state.current)
         elseif mode == "force" then
-            checkForUpdate(false, true, true)
+            checkForUpdate(false, true, true, state.current)
         else
-            checkForUpdate(false, false, false)
+            checkForUpdate(false, false, false, state.current)
         end
     elseif command == "who" or command == "online" then
         listOnlineUsers()
@@ -1909,6 +2080,10 @@ local function handleSlashCommand(body)
         togglePinCurrent()
     elseif command == "quiet" then
         toggleQuietVersionWarnings()
+    elseif command == "compat" or command == "legacy" or command == "oldclients" then
+        toggleOldClientCompat()
+    elseif command == "version" or command == "about" then
+        showVersionInfo()
     elseif command == "sync" or command == "history" then
         local count = 0
         for publicId, u in pairs(state.users or {}) do
@@ -1926,7 +2101,7 @@ local function handleSlashCommand(body)
         if rest ~= "" then renameCurrentGroup(rest) else systemMessage("Usage: /rename new group name") end
     elseif command == "leave" then
         leaveCurrentGroup()
-    elseif command == "info" or command == "settings" then
+    elseif command == "info" or command == "chatsettings" then
         openGroupSettings()
     elseif command == "pm" or command == "msg" then
         local id, user = resolveUser(rest)
@@ -1952,6 +2127,14 @@ local function handleSlashCommand(body)
         systemMessage("Display name updated.")
     elseif command == "clear" then
         clearCurrentChat()
+    elseif command == "app" or command == "controls" then
+        openAppControls()
+    elseif command == "exit" or command == "quit" or command == "close" then
+        shutdownApp("exit")
+    elseif command == "restart" or command == "reload" then
+        shutdownApp("restart")
+    elseif command == "reboot" then
+        shutdownApp("reboot")
     elseif command == "logout" then
         logout()
     else
@@ -2273,6 +2456,45 @@ function logout()
     end
 end
 
+function openAppControls()
+    state.modal = "app_controls"
+    state.modalInput = ""
+    state.modalData = nil
+end
+
+function shutdownApp(mode)
+    mode = tostring(mode or "exit")
+
+    if mode == "logout" then
+        logout()
+        return
+    end
+
+    if mode == "reboot" then
+        savePrefs()
+        if saveHistory then saveHistory() end
+        clear()
+        reset()
+        if type(term.setCursorBlink) == "function" then term.setCursorBlink(false) end
+        os.reboot()
+        return
+    end
+
+    state.restartRequested = mode == "restart"
+    state.exitReason = mode
+    state.running = false
+    state.modal = nil
+    state.modalInput = ""
+
+    savePrefs()
+    if saveHistory then saveHistory() end
+
+    -- Wake any blocking pullEvent/rednet loop quickly so the app can close cleanly.
+    if type(os.queueEvent) == "function" then
+        os.queueEvent("xenitchat_shutdown")
+    end
+end
+
 
 -- ============================================================
 -- Buffered rendering (reduces CraftOS-PC flicker)
@@ -2416,6 +2638,33 @@ end
 -- Modals
 -- ============================================================
 
+
+local function closeModal()
+    state.modal = nil
+    state.modalInput = ""
+    state.modalData = nil
+end
+
+local function modalHeader(mx, my, mw, title, subtitle, closeAction)
+    local th = T()
+    fill(mx, my, mw, 1, th.top or th.accent)
+    text(mx + 1, my, trim(title or "", math.max(1, mw - 6)), colors.white, th.top or th.accent)
+
+    if mw >= 7 then
+        addButton("modal_x", mx + mw - 2, my, 2, "X", colors.white, th.danger or colors.red, closeAction or closeModal)
+    end
+
+    if subtitle and subtitle ~= "" and my + 1 <= h then
+        text(mx + 1, my + 1, trim(subtitle, mw - 2), colors.gray, colors.lightGray)
+    end
+end
+
+local function modalDivider(mx, y, mw)
+    if y >= 1 and y <= h then
+        fill(mx + 1, y, math.max(0, mw - 2), 1, colors.gray)
+    end
+end
+
 local function modalBox(width, height)
     local marginX = w <= 30 and 0 or 2
     local marginY = h <= 14 and 0 or 1
@@ -2436,13 +2685,18 @@ local function modalBox(width, height)
 
     fill(mx, my, mw, mh, colors.lightGray)
 
+    -- Soft terminal-friendly border: enough structure without wasting space.
+    if mw >= 20 and mh >= 6 then
+        fill(mx, my + mh - 1, mw, 1, colors.gray)
+    end
+
     return mx, my, mw, mh
 end
 
 local function drawCreateModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 44, isPocket() and 11 or 9)
 
-    text(mx + 1, my + 1, "New group", colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, "New group", nil)
     text(mx + 1, my + 3, "Name:", colors.black, colors.lightGray)
     fill(mx + 7, my + 3, mw - 8, 1, colors.white)
     text(mx + 8, my + 3, trim(state.modalInput, mw - 10), colors.black, colors.white)
@@ -2505,7 +2759,7 @@ end
 local function drawDiscoverModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 11 or 13)
 
-    text(mx + 1, my + 1, "Discover public groups", colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, "Discover", "Public groups on the network")
 
     local list = {}
 
@@ -2569,7 +2823,7 @@ end
 local function drawPMModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 44, isPocket() and 7 or 8)
 
-    text(mx + 1, my + 1, "Message user", colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, "Direct message", nil)
     text(mx + 1, my + 3, "Name/ID:", colors.black, colors.lightGray)
     fill(mx + 10, my + 3, mw - 11, 1, colors.white)
     text(mx + 11, my + 3, trim(state.modalInput, mw - 13), colors.black, colors.white)
@@ -2597,7 +2851,7 @@ end
 local function drawPeopleModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 11 or 13)
 
-    text(mx + 1, my + 1, "People", colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, "People", "o online  * friend  ! request  ? sent")
 
     local list = getSortedUsers()
     local maxRows = mh - 5
@@ -2652,8 +2906,7 @@ end
 local function drawFriendInboxModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 52, isPocket() and 12 or 14)
 
-    text(mx + 1, my + 1, "Friend inbox", colors.black, colors.lightGray)
-    text(mx + 1, my + 2, "! incoming | ? sent", colors.gray, colors.lightGray)
+    modalHeader(mx, my, mw, "Friend inbox", "! incoming  |  ? sent")
 
     local rows = {}
 
@@ -2706,8 +2959,7 @@ end
 local function drawBlockedModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 52, isPocket() and 12 or 14)
 
-    text(mx + 1, my + 1, "Blocked users", colors.black, colors.lightGray)
-    text(mx + 1, my + 2, "Click a user to unblock.", colors.gray, colors.lightGray)
+    modalHeader(mx, my, mw, "Blocked users", "Click a user to unblock")
 
     local rows = {}
 
@@ -2748,7 +3000,7 @@ end
 local function drawFriendSearchModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 44, 7)
 
-    text(mx + 1, my + 1, "Add friend", colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, "Add friend", nil)
     text(mx + 1, my + 3, "Name/ID:", colors.black, colors.lightGray)
     fill(mx + 10, my + 3, mw - 11, 1, colors.white)
     text(mx + 11, my + 3, trim(state.modalInput, mw - 13), colors.black, colors.white)
@@ -2780,7 +3032,7 @@ local function drawUserInfoModal()
 
     local mx, my, mw, mh = modalBox(isPocket() and w or 48, isPocket() and 10 or 11)
 
-    text(mx + 1, my + 1, "User info", colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, "User info", nil)
     text(mx + 1, my + 3, trim("Name: " .. name, mw - 2), colors.black, colors.lightGray)
     text(mx + 1, my + 4, trim("Status: " .. status, mw - 2), colors.gray, colors.lightGray)
     text(mx + 1, my + 5, trim("ID: " .. shortId(id), mw - 2), colors.gray, colors.lightGray)
@@ -2842,7 +3094,7 @@ local function drawProfileModal()
 
     local title = state.modalMode == "status" and "Set status" or "Set display name"
 
-    text(mx + 1, my + 1, title, colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, title, nil)
 
     fill(mx + 1, my + 3, mw - 2, 1, colors.white)
     text(mx + 2, my + 3, trim(state.modalInput, mw - 4), colors.black, colors.white)
@@ -2879,12 +3131,32 @@ local function drawProfileModal()
 end
 
 
+local function drawSettingsModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 54, isPocket() and 12 or 13)
+
+    modalHeader(mx, my, mw, "Settings", "Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()))
+
+    text(mx + 1, my + 3, trim("App version: v" .. appVersion(), mw - 2), colors.black, colors.lightGray)
+    text(mx + 1, my + 4, trim("Protocol codename: " .. protocolName(), mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 5, trim("Compatibility number: " .. tostring(protocolVersion()), mw - 2), colors.gray, colors.lightGray)
+
+    local quietLabel = state.quietVersionWarnings and "Quiet version spam: ON" or "Quiet version spam: OFF"
+    local oldLabel = state.allowOldClients and "Talk to older clients: ON (BUGGY)" or "Talk to older clients: OFF"
+
+    addButton("set_quiet", mx + 1, my + 7, mw - 2, quietLabel, colors.black, state.quietVersionWarnings and T().good or colors.gray, toggleQuietVersionWarnings)
+    addButton("set_old", mx + 1, my + 8, mw - 2, oldLabel, colors.black, state.allowOldClients and T().warn or colors.white, toggleOldClientCompat)
+
+    text(mx + 1, my + 10, trim("Buggy mode only accepts older protocol packets as best-effort.", mw - 2), colors.red, colors.lightGray)
+
+    addButton("settings_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
+end
+
 local function drawGroupSettingsModal()
     local c = state.convos[state.current]
     local isGroup = canManageGroup(c)
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 12 or 13)
 
-    text(mx + 1, my + 1, "Chat settings", colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, "Chat settings", nil)
 
     if not c then
         text(mx + 1, my + 3, "No chat selected.", colors.gray, colors.lightGray)
@@ -2921,7 +3193,7 @@ end
 local function drawGroupRenameModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 46, isPocket() and 8 or 8)
 
-    text(mx + 1, my + 1, "Rename group", colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, "Rename group", nil)
     text(mx + 1, my + 2, "Everyone may receive this new name.", colors.gray, colors.lightGray)
 
     fill(mx + 1, my + 4, mw - 2, 1, colors.white)
@@ -2939,8 +3211,7 @@ end
 local function drawMainMenuModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 44, isPocket() and 14 or 15)
 
-    text(mx + 1, my + 1, "Menu", colors.black, colors.lightGray)
-    text(mx + 1, my + 2, trim(currentChatTitle() .. "  |  /help for commands", mw - 2), colors.gray, colors.lightGray)
+    modalHeader(mx, my, mw, "Menu", trim(currentChatTitle() .. "  |  /help", mw - 2))
 
     local items = {
         { "Chats", openChatsModal, T().good, colors.black },
@@ -2961,7 +3232,10 @@ local function drawMainMenuModal()
             systemMessage("History sync requested from " .. tostring(count) .. " online peer(s).")
         end, colors.lightGray, colors.black },
         { "Auto Update", openUpdateModal, colors.lightGray, colors.black },
-        { "Profile", function() state.modal = "profile" state.modalMode = "profile" state.modalInput = state.profile.display or state.username or "" end, colors.lightGray, colors.black }
+        { "Profile", function() state.modal = "profile" state.modalMode = "profile" state.modalInput = state.profile.display or state.username or "" end, colors.lightGray, colors.black },
+        { "Settings", openSettingsModal, colors.lightGray, colors.black },
+        { "App Controls", openAppControls, T().warn, colors.black },
+        { "Close App", function() shutdownApp("exit") end, T().danger, colors.white }
     }
 
     local rowY = my + 3
@@ -2973,20 +3247,22 @@ local function drawMainMenuModal()
     end
 
     local fy = my + mh - 1
-    addButton("menu_theme", mx + 1, fy, 7, "Theme", colors.black, colors.lightGray, function()
+    local gap = 1
+    local bw = math.max(4, math.floor((mw - 2 - gap * 3) / 4))
+    addButton("menu_theme", mx + 1, fy, bw, "Theme", colors.black, colors.lightGray, function()
         state.modal = "theme"
     end)
-    addButton("menu_help", mx + 9, fy, 6, "Help", colors.black, colors.lightGray, function()
+    addButton("menu_settings", mx + 1 + bw + gap, fy, bw, "Settings", colors.black, colors.lightGray, openSettingsModal)
+    addButton("menu_help", mx + 1 + (bw + gap) * 2, fy, bw, "Help", colors.black, colors.lightGray, function()
         state.modal = "help"
     end)
-    addButton("menu_logout", mx + mw - 8, fy, 8, "Logout", colors.white, T().danger, logout)
+    addButton("menu_close", mx + 1 + (bw + gap) * 3, fy, mw - 2 - (bw + gap) * 3, "Close", colors.white, colors.gray, closeModal)
 end
 
 local function drawChatsModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 13 or 14)
 
-    text(mx + 1, my + 1, "Chats", colors.black, colors.lightGray)
-    text(mx + 1, my + 2, "Select a chat. New messages show a count.", colors.gray, colors.lightGray)
+    modalHeader(mx, my, mw, "Chats", "Select a chat. New messages show a count.")
 
     local list = getConvoList()
     local maxRows = mh - 6
@@ -3030,7 +3306,7 @@ end
 local function drawHelpModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 54, isPocket() and 13 or 15)
 
-    text(mx + 1, my + 1, "Help / shortcuts", colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, "Help / shortcuts", nil)
 
     local lines = {
         "ENTER send   TAB next chat   ESC close",
@@ -3040,10 +3316,11 @@ local function drawHelpModal()
         "/rename name       /leave       /info",
         "/status text       /name display-name",
         "/discover          /theme        /sync",
-        "/who  /id  /readall  /pin  /quiet",
+        "/who  /id  /version  /readall  /pin",
+        "/quiet  /compat buggy old-client mode",
         "/block name        /unblock name",
         "/update            /update install",
-        "/clear             /logout",
+        "/clear   /logout   /exit   /restart",
         "Chat mark: ^ pinned. People: * friend, ! request, ? sent",
         "Groups: rename is shared; leave stops auto rejoin.",
         "Pocket: use Chats + Menu; avoid tiny buttons."
@@ -3063,34 +3340,35 @@ end
 local function drawUpdateModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 10 or 11)
 
-    text(mx + 1, my + 1, "Auto Update", colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, "Auto Update", nil)
     text(mx + 1, my + 3, trim("Source: GitHub benchware/Xenit-Chat", mw - 2), colors.black, colors.lightGray)
-    text(mx + 1, my + 4, trim("Local version: v" .. tostring(APP.version), mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 4, trim("Local version: v" .. appVersion() .. " | " .. protocolName(), mw - 2), colors.gray, colors.lightGray)
     text(mx + 1, my + 5, trim("Startup checks install newer versions automatically.", mw - 2), colors.gray, colors.lightGray)
     text(mx + 1, my + 6, trim("Manual: /update or /update install", mw - 2), colors.gray, colors.lightGray)
 
     local fy = my + mh - 1
     addButton("upd_check", mx + 1, fy, 9, "Check", colors.black, T().accent, function()
         state.modal = nil
-        checkForUpdate(false, false, false)
+        checkForUpdate(false, false, false, state.current)
     end)
 
     addButton("upd_install", mx + 11, fy, 10, "Install", colors.black, T().good, function()
         state.modal = nil
-        checkForUpdate(false, true, false)
+        checkForUpdate(false, true, false, state.current)
     end)
 
     addButton("upd_close", mx + mw - 8, fy, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
 
 local function drawThemeModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 36, 7)
+    local names = { "midnight", "dark", "ocean", "neon", "graphite", "forest", "sunset", "amethyst", "ice", "clean" }
+    local rows = math.min(#names, math.max(3, h - 5))
+    local mx, my, mw, mh = modalBox(isPocket() and w or 40, rows + 4)
 
-    text(mx + 1, my + 1, "Choose theme", colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, "Choose theme", nil)
 
-    local names = { "midnight", "dark", "ocean", "clean" }
-
-    for i, key in ipairs(names) do
+    for i = 1, math.min(#names, mh - 3) do
+        local key = names[i]
         local th = THEMES[key]
         local label = state.theme == key and "[" .. th.name .. "]" or th.name
 
@@ -3105,10 +3383,50 @@ local function drawThemeModal()
     end)
 end
 
+local function drawAppControlsModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 46, isPocket() and 12 or 13)
+
+    modalHeader(mx, my, mw, "App controls", "Close, restart, logout, or reboot safely.")
+
+    local y = my + 3
+    local function row(id, label, note, bgColor, fgColor, action)
+        if y <= my + mh - 2 then
+            addButton(id, mx + 1, y, mw - 2, label, fgColor or colors.black, bgColor or colors.white, action)
+            if note and note ~= "" and y + 1 <= my + mh - 2 then
+                text(mx + 2, y + 1, trim(note, mw - 4), colors.gray, colors.lightGray)
+                y = y + 2
+            else
+                y = y + 1
+            end
+        end
+    end
+
+    row("app_restart", "Restart XenitChat", "Reloads the script after saving prefs/history.", T().good, colors.black, function()
+        shutdownApp("restart")
+    end)
+
+    row("app_exit", "Close XenitChat", "Returns to the CraftOS shell.", T().warn, colors.black, function()
+        shutdownApp("exit")
+    end)
+
+    row("app_logout", "Logout", "Go back to the login screen only.", colors.white, colors.black, function()
+        logout()
+        state.modal = nil
+    end)
+
+    if mh >= 12 then
+        row("app_reboot", "Reboot computer", "Full CraftOS reboot.", T().danger, colors.white, function()
+            shutdownApp("reboot")
+        end)
+    end
+
+    addButton("app_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
+end
+
 local function drawErrorModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 44, 5)
 
-    text(mx + 1, my + 1, "Notice", colors.black, colors.lightGray)
+    modalHeader(mx, my, mw, "Notice", nil)
     text(mx + 1, my + 2, trim(state.modalInput, mw - 2), colors.red, colors.lightGray)
 
     addButton("err_ok", mx + math.floor((mw - 8) / 2), my + 4, 8, "OK", colors.black, T().good, function()
@@ -3124,6 +3442,8 @@ local function drawModal()
         drawChatsModal()
     elseif state.modal == "help" then
         drawHelpModal()
+    elseif state.modal == "settings" then
+        drawSettingsModal()
     elseif state.modal == "group_settings" then
         drawGroupSettingsModal()
     elseif state.modal == "group_rename" then
@@ -3150,6 +3470,8 @@ local function drawModal()
         drawThemeModal()
     elseif state.modal == "update" then
         drawUpdateModal()
+    elseif state.modal == "app_controls" then
+        drawAppControlsModal()
     elseif state.modal == "error" then
         drawErrorModal()
     end
@@ -3436,10 +3758,10 @@ local function versionNotice(msg)
 
     local who = displayName(msg.user, msg.publicId, msg.profile)
 
-    if msg.version > APP.version then
-        addMessage("global", "system", who .. " is on newer XenitChat v" .. tostring(msg.version) .. ". Run /update install if messages do not work.", "warn", { silent = true })
-    elseif msg.version < APP.version then
-        addMessage("global", "system", "Ignored an old-format " .. tostring(msg.kind or "packet") .. " from " .. who .. " (v" .. tostring(msg.version) .. ").", "warn", { silent = true })
+    if tonumber(msg.version) > protocolVersion() then
+        addMessage("global", "system", who .. " is on newer XenitChat v" .. tostring(msg.appVersion or msg.version) .. " (" .. tostring(msg.protocolName or "unknown") .. "). Run /update install if messages do not work.", "warn", { silent = true })
+    elseif tonumber(msg.version) < protocolVersion() then
+        addMessage("global", "system", "Ignored an old-format " .. tostring(msg.kind or "packet") .. " from " .. who .. " (v" .. tostring(msg.appVersion or msg.version) .. ", " .. tostring(msg.protocolName or "unknown") .. "). Enable Settings > Talk to older clients (BUGGY) to accept it.", "warn", { silent = true })
     end
 end
 
@@ -3466,14 +3788,19 @@ end
 local function handleNetworkMessage(senderId, msg)
     if type(msg) ~= "table" then return end
     if msg.app ~= APP.name then return end
-    if type(msg.version) ~= "number" then return end
+    if tonumber(msg.version) == nil then return end
     if not msg.user or not msg.publicId then return end
     if msg.publicId == state.publicId then return end
 
     if rememberPacket(msg) then return end
 
-    if msg.version ~= APP.version then
-        if QUIET_VERSION_KINDS[msg.kind] then
+    if not sameProtocolVersion(msg.version) then
+        local remoteVersion = tonumber(msg.version)
+
+        if remoteVersion and remoteVersion < protocolVersion() and state.allowOldClients then
+            -- Best-effort compatibility mode. Marked buggy because old clients may
+            -- use missing fields, older message formats, or noisier packet flows.
+        elseif QUIET_VERSION_KINDS[msg.kind] then
             -- Background packets from older/newer clients should not spam chat.
             -- Keep processing them where the schema is harmless enough.
         else
@@ -3919,6 +4246,18 @@ local function boot()
 
     clear()
     reset()
+    if type(term.setCursorBlink) == "function" then term.setCursorBlink(true) end
+
+    if state.restartRequested then
+        state.restartRequested = false
+        if type(shell) == "table" and type(shell.run) == "function" then
+            shell.run(getProgramPath())
+        else
+            print("Restart requested. Run " .. getProgramPath() .. " again.")
+        end
+    elseif state.exitReason == "exit" then
+        print(APP.name .. " closed.")
+    end
 end
 
 boot()

@@ -4,16 +4,20 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = 13,
+    version = 15,
     protocol = "xenitchat_bus",
     updateUrl = "https://raw.githubusercontent.com/benchware/Xenit-Chat/main/xenitchat.lua",
 
     accountFile = ".xenit_accounts",
     nodeSecretFile = ".xenit_node_secret",
     prefsFile = ".xenit_prefs",
+    historyFile = ".xenit_history",
 
     maxMessages = 350,
     messageLimit = 200,
+    historySyncLimit = 80,
+    historySyncCooldown = 12,
+    versionNoticeCooldown = 90,
 
     helloInterval = 4,
     onlineTimeout = 15,
@@ -135,6 +139,11 @@ local state = {
     updateBusy = false,
     packetSeen = {},
     packetSeenOrder = {},
+    messageSeen = {},
+    historySyncLast = {},
+    versionNoticeLast = {},
+    pinned = {},
+    quietVersionWarnings = true,
     profile = {
         display = "",
         status = "Available"
@@ -560,6 +569,8 @@ local function defaultPrefs()
         blocked = {},
         blockedInfo = {},
         leftGroups = {},
+        pinned = {},
+        quietVersionWarnings = true,
         convos = {
             global = {
                 key = "global",
@@ -586,6 +597,8 @@ local function savePrefs()
         blocked = state.blocked,
         blockedInfo = state.blockedInfo,
         leftGroups = state.leftGroups,
+        pinned = state.pinned,
+        quietVersionWarnings = state.quietVersionWarnings,
         convos = state.convos
     }
 
@@ -604,6 +617,8 @@ local function loadPrefs()
     if type(data.blocked) ~= "table" then data.blocked = {} end
     if type(data.blockedInfo) ~= "table" then data.blockedInfo = {} end
     if type(data.leftGroups) ~= "table" then data.leftGroups = {} end
+    if type(data.pinned) ~= "table" then data.pinned = {} end
+    if type(data.quietVersionWarnings) ~= "boolean" then data.quietVersionWarnings = true end
     if type(data.profile) ~= "table" then data.profile = { display = "", status = "Available" } end
 
     state.remember = data.remember ~= false
@@ -614,6 +629,8 @@ local function loadPrefs()
     state.blocked = data.blocked
     state.blockedInfo = data.blockedInfo
     state.leftGroups = data.leftGroups
+    state.pinned = data.pinned
+    state.quietVersionWarnings = data.quietVersionWarnings
     state.convos = data.convos
 
     if not state.convos.global then
@@ -711,6 +728,44 @@ local function ensureConvo(key, title, kind, private, listed, owner, peerId)
     savePrefs()
 end
 
+local saveHistory
+
+local function messageIdentity(key, from, body, kind, meta)
+    meta = meta or {}
+
+    if meta.msgId and meta.msgId ~= "" then
+        return tostring(meta.msgId)
+    end
+
+    return slowHash("MSG|" .. tostring(key) .. "|" .. tostring(from) .. "|" .. tostring(body) .. "|" .. tostring(kind) .. "|" .. tostring(meta.fromId or "") .. "|" .. tostring(meta.time or ""), 8)
+end
+
+local function rememberMessage(key, msgId)
+    if not key or not msgId then return end
+    state.messageSeen[key] = state.messageSeen[key] or {}
+    state.messageSeen[key][msgId] = true
+end
+
+local function hasMessage(key, msgId)
+    return key and msgId and state.messageSeen[key] and state.messageSeen[key][msgId]
+end
+
+local function rebuildMessageSeen()
+    state.messageSeen = {}
+
+    for key, list in pairs(state.messages or {}) do
+        if type(list) == "table" then
+            for _, m in ipairs(list) do
+                if type(m) == "table" then
+                    local id = m.msgId or messageIdentity(key, m.from, m.body, m.kind, m)
+                    m.msgId = id
+                    rememberMessage(key, id)
+                end
+            end
+        end
+    end
+end
+
 local function addMessage(key, from, body, kind, meta)
     key = key or "global"
 
@@ -723,35 +778,269 @@ local function addMessage(key, from, body, kind, meta)
     end
 
     meta = meta or {}
+    local msgId = messageIdentity(key, from, body, kind or "chat", meta)
 
-    table.insert(state.messages[key], {
+    if hasMessage(key, msgId) then
+        return false
+    end
+
+    local entry = {
         from = tostring(from or "system"),
         body = clampMessage(body or ""),
         kind = kind or "chat",
-        time = textutils.formatTime(os.time(), true),
-        msgId = meta.msgId,
+        time = meta.time or textutils.formatTime(os.time(), true),
+        epoch = meta.epoch or os.time(),
+        msgId = msgId,
         fromId = meta.fromId,
         outgoing = meta.outgoing,
         seen = meta.seen or false
-    })
+    }
+
+    table.insert(state.messages[key], entry)
+    rememberMessage(key, msgId)
 
     while #state.messages[key] > APP.maxMessages do
-        table.remove(state.messages[key], 1)
+        local removed = table.remove(state.messages[key], 1)
+        if removed and removed.msgId and state.messageSeen[key] then
+            state.messageSeen[key][removed.msgId] = nil
+        end
     end
 
     touchConvo(key)
 
     if key == state.current then
         state.scroll = 0
-    else
+    elseif not meta.silent then
         state.convos[key].unread = (state.convos[key].unread or 0) + 1
     end
 
     savePrefs()
+    if saveHistory and not meta.skipSave then saveHistory() end
+    return true
 end
 
 local function systemMessage(body, key)
     addMessage(key or state.current, "system", body, "system")
+end
+
+local function isHistorySyncable(key, publicId)
+    local c = state.convos[key]
+    if not c then return false end
+
+    if key == "global" then return true end
+
+    if c.type == "pm" then
+        return publicId ~= nil and c.peerId == publicId
+    end
+
+    if c.private == true then return false end
+    if c.listed == false then return false end
+    if state.leftGroups[key] then return false end
+
+    return true
+end
+
+saveHistory = function()
+    local data = {
+        version = APP.version,
+        savedAt = os.time(),
+        messages = {},
+        convos = {}
+    }
+
+    for key, list in pairs(state.messages or {}) do
+        if type(list) == "table" and #list > 0 then
+            data.messages[key] = {}
+            local startAt = math.max(1, #list - APP.maxMessages + 1)
+
+            for i = startAt, #list do
+                local m = list[i]
+                if type(m) == "table" then
+                    table.insert(data.messages[key], {
+                        from = m.from,
+                        body = m.body,
+                        kind = m.kind,
+                        time = m.time,
+                        epoch = m.epoch,
+                        msgId = m.msgId,
+                        fromId = m.fromId,
+                        outgoing = m.outgoing,
+                        seen = m.seen
+                    })
+                end
+            end
+
+            if state.convos[key] then
+                data.convos[key] = state.convos[key]
+            end
+        end
+    end
+
+    writeSerialized(APP.historyFile, data)
+end
+
+local function loadHistory()
+    local data = readSerialized(APP.historyFile, nil)
+
+    if type(data) ~= "table" or type(data.messages) ~= "table" then
+        rebuildMessageSeen()
+        return
+    end
+
+    if type(data.convos) == "table" then
+        for key, c in pairs(data.convos) do
+            if type(c) == "table" and key ~= "global" and not state.convos[key] then
+                state.convos[key] = c
+            end
+        end
+    end
+
+    for key, list in pairs(data.messages) do
+        if type(list) == "table" then
+            if not state.messages[key] then state.messages[key] = {} end
+            if not state.convos[key] then
+                ensureConvo(key, key, "public", false, true, "history")
+            end
+
+            for _, m in ipairs(list) do
+                if type(m) == "table" and m.body then
+                    addMessage(key, m.from, m.body, m.kind, {
+                        msgId = m.msgId,
+                        fromId = m.fromId,
+                        outgoing = m.outgoing,
+                        seen = m.seen,
+                        time = m.time,
+                        epoch = m.epoch,
+                        silent = true,
+                        skipSave = true
+                    })
+                end
+            end
+
+            if state.convos[key] then
+                state.convos[key].unread = 0
+            end
+        end
+    end
+
+    rebuildMessageSeen()
+end
+
+local function historyKeysForPeer(publicId)
+    local keys = {}
+
+    for key, _ in pairs(state.convos or {}) do
+        if isHistorySyncable(key, publicId) then
+            table.insert(keys, key)
+        end
+    end
+
+    return keys
+end
+
+local function makeHistoryBundle(keys, requesterPublicId)
+    local bundles = {}
+
+    for _, key in ipairs(keys or {}) do
+        if isHistorySyncable(key, requesterPublicId) then
+            local list = state.messages[key] or {}
+            local out = {}
+            local startAt = math.max(1, #list - APP.historySyncLimit + 1)
+
+            for i = startAt, #list do
+                local m = list[i]
+                if type(m) == "table" and m.kind ~= "system" and m.body then
+                    table.insert(out, {
+                        from = m.from,
+                        body = m.body,
+                        kind = m.kind,
+                        time = m.time,
+                        epoch = m.epoch,
+                        msgId = m.msgId,
+                        fromId = m.fromId,
+                        outgoing = false,
+                        seen = m.seen
+                    })
+                end
+            end
+
+            if #out > 0 then
+                local c = state.convos[key] or {}
+                table.insert(bundles, {
+                    key = key,
+                    title = c.title or key,
+                    type = c.type or "public",
+                    private = c.private or false,
+                    listed = c.listed ~= false,
+                    owner = c.owner or "unknown",
+                    peerId = c.peerId,
+                    messages = out
+                })
+            end
+        end
+    end
+
+    return bundles
+end
+
+local function importHistoryBundles(bundles, senderPublicId)
+    local imported = 0
+
+    if type(bundles) ~= "table" then return 0 end
+
+    for _, bundle in ipairs(bundles) do
+        if type(bundle) == "table" and bundle.key and type(bundle.messages) == "table" then
+            local key = tostring(bundle.key)
+            local allowed = false
+
+            if key == "global" then
+                allowed = true
+            elseif bundle.type == "pm" then
+                allowed = bundle.peerId == state.publicId or key == pmKeyFor(senderPublicId, bundle.title) or key == pmKeyFor(senderPublicId, senderPublicId)
+                key = pmKeyFor(senderPublicId, bundle.title)
+            elseif bundle.private ~= true and bundle.listed ~= false and not state.leftGroups[key] then
+                allowed = true
+            end
+
+            if allowed then
+                ensureConvo(key, bundle.title or key, bundle.type or "public", bundle.private or false, bundle.listed ~= false, bundle.owner or "history", bundle.type == "pm" and senderPublicId or bundle.peerId)
+
+                for _, m in ipairs(bundle.messages) do
+                    if type(m) == "table" and m.body then
+                        local added = addMessage(key, m.from, m.body, m.kind, {
+                            msgId = m.msgId,
+                            fromId = m.fromId or senderPublicId,
+                            outgoing = false,
+                            seen = m.seen,
+                            time = m.time,
+                            epoch = m.epoch,
+                            silent = true
+                        })
+
+                        if added then imported = imported + 1 end
+                    end
+                end
+            end
+        end
+    end
+
+    if imported > 0 then saveHistory() end
+    return imported
+end
+
+local function requestHistorySync(senderId, publicId)
+    if not senderId or not publicId then return end
+
+    local now = os.clock()
+    if state.historySyncLast[publicId] and now - state.historySyncLast[publicId] < APP.historySyncCooldown then
+        return
+    end
+
+    state.historySyncLast[publicId] = now
+
+    sendTo(senderId, "history_request", {
+        keys = historyKeysForPeer(publicId)
+    })
 end
 
 local function switchConvo(key)
@@ -776,6 +1065,10 @@ local function getConvoList()
     table.sort(list, function(a, b)
         if a.key == "global" then return true end
         if b.key == "global" then return false end
+
+        local ap = state.pinned and state.pinned[a.key] == true
+        local bp = state.pinned and state.pinned[b.key] == true
+        if ap ~= bp then return ap end
 
         if (a.unread or 0) ~= (b.unread or 0) then
             return (a.unread or 0) > (b.unread or 0)
@@ -1023,14 +1316,16 @@ end
 local function chatLabel(c, compact)
     if not c then return "#global" end
 
+    local pin = (state.pinned and state.pinned[c.key]) and "^ " or ""
+
     if c.type == "pm" then
         local name = peerDisplayName(c.peerId, c.title or c.key)
-        if compact then return "DM " .. name end
-        return "Direct message: " .. name
+        if compact then return pin .. "DM " .. name end
+        return pin .. "Direct message: " .. name
     end
 
     if c.key == "global" then return "#global" end
-    return "#" .. tostring(c.title or c.key)
+    return pin .. "#" .. tostring(c.title or c.key)
 end
 
 local function currentChatTitle()
@@ -1072,7 +1367,9 @@ end
 local function clearCurrentChat()
     if state.current and state.messages[state.current] then
         state.messages[state.current] = {}
+        if state.messageSeen then state.messageSeen[state.current] = {} end
         systemMessage("Chat history cleared locally.", state.current)
+        if saveHistory then saveHistory() end
     end
 end
 
@@ -1497,7 +1794,75 @@ local function openPM(publicId, user)
 end
 
 local sendFriendRequest
+local blockUser
+local unblockUser
 local logout
+
+local function markAllRead()
+    for _, c in pairs(state.convos or {}) do
+        c.unread = 0
+    end
+    savePrefs()
+    systemMessage("Marked all chats as read.")
+end
+
+local function togglePinCurrent()
+    local c = state.convos[state.current]
+    if not c then return end
+    if c.key == "global" then
+        systemMessage("Global is always at the top.")
+        return
+    end
+    state.pinned = state.pinned or {}
+    state.pinned[c.key] = not state.pinned[c.key] or nil
+    savePrefs()
+    systemMessage((state.pinned[c.key] and "Pinned " or "Unpinned ") .. chatLabel(c, true) .. ".")
+end
+
+local function listOnlineUsers()
+    local list = getSortedUsers()
+    if #list == 0 then
+        systemMessage("No online users found.")
+        return
+    end
+
+    local names = {}
+    for i = 1, math.min(#list, 8) do
+        local u = list[i]
+        table.insert(names, displayName(u.username, u.publicId, u.profile) .. "#" .. shortId(u.publicId))
+    end
+
+    if #list > #names then
+        table.insert(names, "+" .. tostring(#list - #names) .. " more")
+    end
+
+    systemMessage("Online: " .. table.concat(names, ", "))
+end
+
+local function resolveBlocked(value)
+    value = tostring(value or "")
+    if value == "" then return nil end
+
+    for publicId, _ in pairs(state.blocked or {}) do
+        local info = (state.blockedInfo and state.blockedInfo[publicId]) or {}
+        local shown = displayName(info.username or "blocked", publicId, info.profile or {})
+        if shortId(publicId):lower() == value:lower() or publicId:sub(1, #value):lower() == value:lower() or shown:lower() == value:lower() or tostring(info.username or ""):lower() == value:lower() then
+            return publicId
+        end
+    end
+
+    return nil
+end
+
+local function showMyId()
+    systemMessage("Your ID: " .. shortId(state.publicId) .. "  (use this for friend/DM search)")
+end
+
+local function toggleQuietVersionWarnings()
+    state.quietVersionWarnings = not state.quietVersionWarnings
+    savePrefs()
+    systemMessage("Version warning noise filter: " .. (state.quietVersionWarnings and "ON" or "OFF") .. ".")
+end
 
 local function handleSlashCommand(body)
     if body:sub(1, 1) ~= "/" then return false end
@@ -1518,6 +1883,8 @@ local function handleSlashCommand(body)
         state.modal = "friend_inbox"
     elseif command == "blocked" then
         state.modal = "blocked"
+    elseif command == "requests" then
+        state.modal = "friend_inbox"
     elseif command == "theme" then
         state.modal = "theme"
     elseif command == "discover" or command == "d" then
@@ -1531,6 +1898,25 @@ local function handleSlashCommand(body)
         else
             checkForUpdate(false, false, false)
         end
+    elseif command == "who" or command == "online" then
+        listOnlineUsers()
+    elseif command == "id" or command == "myid" then
+        showMyId()
+    elseif command == "read" or command == "readall" then
+        markAllRead()
+    elseif command == "pin" or command == "unpin" then
+        togglePinCurrent()
+    elseif command == "quiet" then
+        toggleQuietVersionWarnings()
+    elseif command == "sync" or command == "history" then
+        local count = 0
+        for publicId, u in pairs(state.users or {}) do
+            if u.senderId then
+                requestHistorySync(u.senderId, publicId)
+                count = count + 1
+            end
+        end
+        systemMessage("History sync requested from " .. tostring(count) .. " online peer(s).")
     elseif command == "join" then
         if rest ~= "" then joinGroup(rest) else systemMessage("Usage: /join group_name") end
     elseif command == "new" or command == "group" then
@@ -1547,6 +1933,12 @@ local function handleSlashCommand(body)
     elseif command == "add" or command == "friend" then
         local id, user = resolveUser(rest)
         if id and user then sendFriendRequest(id, user) else systemMessage("User not found online.") end
+    elseif command == "block" then
+        local id, user = resolveUser(rest)
+        if id then blockUser(id, user) systemMessage("Blocked " .. displayName(user.username, id, user.profile) .. ".") else systemMessage("User not found online.") end
+    elseif command == "unblock" then
+        local id = resolveBlocked(rest)
+        if id then unblockUser(id) systemMessage("Unblocked " .. shortId(id) .. ".") else systemMessage("Blocked user not found.") end
     elseif command == "status" then
         state.profile.status = rest ~= "" and trim(rest, 40) or "Available"
         savePrefs()
@@ -1724,7 +2116,7 @@ local function unfriendUser(publicId)
     })
 end
 
-local function blockUser(publicId)
+blockUser = function(publicId)
     if not publicId then return end
 
     local user = state.users[publicId] or {}
@@ -1735,7 +2127,7 @@ local function blockUser(publicId)
     savePrefs()
 end
 
-local function unblockUser(publicId)
+unblockUser = function(publicId)
     if not publicId then return end
 
     state.blocked[publicId] = nil
@@ -2512,9 +2904,11 @@ local function drawGroupSettingsModal()
 
     local by = my + mh - 1
 
+    addButton("grp_pin", mx + 1, by, 7, (state.pinned and state.pinned[state.current]) and "Unpin" or "Pin", colors.black, T().accent, togglePinCurrent)
+
     if isGroup then
-        addButton("grp_rename", mx + 1, by, 9, "Rename", colors.black, T().good, openRenameGroup)
-        addButton("grp_leave", mx + 11, by, 8, "Leave", colors.white, T().danger, function()
+        addButton("grp_rename", mx + 9, by, 9, "Rename", colors.black, T().good, openRenameGroup)
+        addButton("grp_leave", mx + 19, by, 8, "Leave", colors.white, T().danger, function()
             leaveCurrentGroup()
             state.modal = nil
         end)
@@ -2542,7 +2936,7 @@ local function drawGroupRenameModal()
 end
 
 local function drawMainMenuModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 44, isPocket() and 13 or 14)
+    local mx, my, mw, mh = modalBox(isPocket() and w or 44, isPocket() and 14 or 15)
 
     text(mx + 1, my + 1, "Menu", colors.black, colors.lightGray)
     text(mx + 1, my + 2, trim(currentChatTitle() .. "  |  /help for commands", mw - 2), colors.gray, colors.lightGray)
@@ -2554,7 +2948,17 @@ local function drawMainMenuModal()
         { "Discover Groups", requestDiscovery, T().accent, colors.black },
         { "New Group", function() state.modal = "create" state.modalInput = "" state.modalMode = "public" end, T().good, colors.black },
         { "Chat Settings", openGroupSettings, colors.lightGray, colors.black },
+        { (state.pinned and state.pinned[state.current]) and "Unpin Chat" or "Pin Chat", togglePinCurrent, colors.lightGray, colors.black },
+        { "Mark All Read", markAllRead, colors.lightGray, colors.black },
         { "Direct Message", function() state.modal = "pm" state.modalInput = "" end, colors.lightGray, colors.black },
+        { "History Sync", function()
+            local count = 0
+            for publicId, u in pairs(state.users or {}) do
+                if u.senderId then requestHistorySync(u.senderId, publicId) count = count + 1 end
+            end
+            state.modal = nil
+            systemMessage("History sync requested from " .. tostring(count) .. " online peer(s).")
+        end, colors.lightGray, colors.black },
         { "Auto Update", openUpdateModal, colors.lightGray, colors.black },
         { "Profile", function() state.modal = "profile" state.modalMode = "profile" state.modalInput = state.profile.display or state.username or "" end, colors.lightGray, colors.black }
     }
@@ -2634,10 +3038,12 @@ local function drawHelpModal()
         "/join group        /new group",
         "/rename name       /leave       /info",
         "/status text       /name display-name",
-        "/discover          /theme",
+        "/discover          /theme        /sync",
+        "/who  /id  /readall  /pin  /quiet",
+        "/block name        /unblock name",
         "/update            /update install",
         "/clear             /logout",
-        "People marks: * friend, ! request, ? sent",
+        "Chat mark: ^ pinned. People: * friend, ! request, ? sent",
         "Groups: rename is shared; leave stops auto rejoin.",
         "Pocket: use Chats + Menu; avoid tiny buttons."
     }
@@ -2997,38 +3403,81 @@ end
 -- Network receive
 -- ============================================================
 
+local QUIET_VERSION_KINDS = {
+    hello = true,
+    hello_ack = true,
+    discover = true,
+    discover_reply = true,
+    history_request = true,
+    history_reply = true,
+    read = true
+}
+
+local function shouldShowVersionNotice(msg)
+    if state.quietVersionWarnings ~= false and QUIET_VERSION_KINDS[msg.kind] then
+        return false
+    end
+
+    local now = os.clock()
+    local key = tostring(msg.publicId or "?") .. ":" .. tostring(msg.version or "?") .. ":" .. tostring(msg.kind or "?")
+    local last = state.versionNoticeLast[key]
+
+    if last and now - last < APP.versionNoticeCooldown then
+        return false
+    end
+
+    state.versionNoticeLast[key] = now
+    return true
+end
+
+local function versionNotice(msg)
+    if not shouldShowVersionNotice(msg) then return end
+
+    local who = displayName(msg.user, msg.publicId, msg.profile)
+
+    if msg.version > APP.version then
+        addMessage("global", "system", who .. " is on newer XenitChat v" .. tostring(msg.version) .. ". Run /update install if messages do not work.", "warn", { silent = true })
+    elseif msg.version < APP.version then
+        addMessage("global", "system", "Ignored an old-format " .. tostring(msg.kind or "packet") .. " from " .. who .. " (v" .. tostring(msg.version) .. ").", "warn", { silent = true })
+    end
+end
+
+local function rememberPacket(msg)
+    if not msg.packetId or not msg.publicId then return false end
+
+    local packetKey = tostring(msg.publicId) .. ":" .. tostring(msg.packetId)
+
+    if state.packetSeen[packetKey] then
+        return true
+    end
+
+    state.packetSeen[packetKey] = true
+    table.insert(state.packetSeenOrder, packetKey)
+
+    while #state.packetSeenOrder > 500 do
+        local oldKey = table.remove(state.packetSeenOrder, 1)
+        state.packetSeen[oldKey] = nil
+    end
+
+    return false
+end
+
 local function handleNetworkMessage(senderId, msg)
     if type(msg) ~= "table" then return end
     if msg.app ~= APP.name then return end
-
     if type(msg.version) ~= "number" then return end
-
-    if msg.version > APP.version then
-        addMessage("global", "system", "Your version is outdated. You cannot read this message.", "warn")
-        return
-    end
-
-    if msg.version < APP.version then
-        addMessage("global", "system", "Message from old XenitChat version ignored.", "warn")
-        return
-    end
-
     if not msg.user or not msg.publicId then return end
     if msg.publicId == state.publicId then return end
 
-    if msg.packetId then
-        local packetKey = tostring(msg.publicId) .. ":" .. tostring(msg.packetId)
+    if rememberPacket(msg) then return end
 
-        if state.packetSeen[packetKey] then
+    if msg.version ~= APP.version then
+        if QUIET_VERSION_KINDS[msg.kind] then
+            -- Background packets from older/newer clients should not spam chat.
+            -- Keep processing them where the schema is harmless enough.
+        else
+            versionNotice(msg)
             return
-        end
-
-        state.packetSeen[packetKey] = true
-        table.insert(state.packetSeenOrder, packetKey)
-
-        while #state.packetSeenOrder > 500 do
-            local oldKey = table.remove(state.packetSeenOrder, 1)
-            state.packetSeen[oldKey] = nil
         end
     end
 
@@ -3047,9 +3496,22 @@ local function handleNetworkMessage(senderId, msg)
         sendTo(senderId, "hello_ack", {
             current = state.current
         })
+        requestHistorySync(senderId, msg.publicId)
 
     elseif msg.kind == "hello_ack" then
+        requestHistorySync(senderId, msg.publicId)
         return
+
+    elseif msg.kind == "history_request" then
+        sendTo(senderId, "history_reply", {
+            bundles = makeHistoryBundle(msg.keys or {}, msg.publicId)
+        })
+
+    elseif msg.kind == "history_reply" then
+        local imported = importHistoryBundles(msg.bundles, msg.publicId)
+        if imported > 0 then
+            addMessage("global", "system", "Synced " .. tostring(imported) .. " older message(s) from " .. displayName(msg.user, msg.publicId, msg.profile) .. ".", "system", { silent = true })
+        end
 
     elseif msg.kind == "discover" then
         local channels = {}
@@ -3449,6 +3911,7 @@ local function boot()
     if type(term.setCursorBlink) == "function" then term.setCursorBlink(false) end
     openModem()
     loadPrefs()
+    loadHistory()
     tryRememberLogin()
 
     parallel.waitForAny(networkLoop, uiLoop)

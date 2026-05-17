@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "19.1.9",
+    version = "19.1.20",
     protocolVersion = 19,
     protocolName = "Quartz",
     protocol = "xenitchat_bus",
@@ -1544,7 +1544,7 @@ local function getSortedUsers()
 end
 
 local function resolveUser(value)
-    value = tostring(value or "")
+    value = tostring(value or ""):gsub("^@", ""):gsub("^#", "")
 
     if value == "" then return nil end
 
@@ -1990,7 +1990,7 @@ local function listOnlineUsers()
 end
 
 local function resolveBlocked(value)
-    value = tostring(value or "")
+    value = tostring(value or ""):gsub("^@", ""):gsub("^#", "")
     if value == "" then return nil end
 
     for publicId, _ in pairs(state.blocked or {}) do
@@ -2034,6 +2034,143 @@ local function openSettingsModal()
     state.modalData = nil
 end
 
+
+COMMAND_HELP = {
+    {
+        title = "Navigate",
+        items = {
+            { cmd = "/help", args = "[command]", desc = "Show this Discord-style command list.", aliases = {"/?", "/commands", "/slash", "/shortcuts"} },
+            { cmd = "/menu", desc = "Open the main menu." },
+            { cmd = "/chats", desc = "Open your chat list." },
+            { cmd = "/settings", desc = "Open settings and compatibility toggles.", aliases = {"/prefs"} },
+            { cmd = "/theme", desc = "Pick a theme." }
+        }
+    },
+    {
+        title = "People",
+        items = {
+            { cmd = "/people", desc = "Open people/friends.", aliases = {"/friends"} },
+            { cmd = "/pm", args = "@name-or-id", desc = "Open a direct message.", aliases = {"/msg", "/dm"} },
+            { cmd = "/friend", args = "@name-or-id", desc = "Send a friend request.", aliases = {"/add"} },
+            { cmd = "/inbox", desc = "Open friend request inbox.", aliases = {"/requests"} },
+            { cmd = "/block", args = "@name-or-id", desc = "Block a user." },
+            { cmd = "/unblock", args = "@name-or-id", desc = "Unblock a user." },
+            { cmd = "/who", desc = "List online users.", aliases = {"/online"} },
+            { cmd = "/id", desc = "Show your short ID.", aliases = {"/myid"} }
+        }
+    },
+    {
+        title = "Chats & groups",
+        items = {
+            { cmd = "/discover", desc = "Find public groups.", aliases = {"/d"} },
+            { cmd = "/new", args = "#group", desc = "Create a public group.", aliases = {"/group"} },
+            { cmd = "/join", args = "#group", desc = "Join a public group." },
+            { cmd = "/rename", args = "new name", desc = "Rename the current group." },
+            { cmd = "/leave", desc = "Leave the current group." },
+            { cmd = "/info", desc = "Open current chat settings.", aliases = {"/chatsettings"} },
+            { cmd = "/pin", desc = "Pin or unpin this chat.", aliases = {"/unpin"} },
+            { cmd = "/readall", desc = "Mark all chats as read.", aliases = {"/read"} },
+            { cmd = "/clear", desc = "Clear this local chat history." }
+        }
+    },
+    {
+        title = "Profile",
+        items = {
+            { cmd = "/status", args = "text", desc = "Set your status." },
+            { cmd = "/name", args = "display name", desc = "Set your display name." }
+        }
+    },
+    {
+        title = "System",
+        items = {
+            { cmd = "/sync", desc = "Request chat history sync.", aliases = {"/history"} },
+            { cmd = "/update", args = "[check|install|force]", desc = "Check or install GitHub update." },
+            { cmd = "/version", desc = "Show app/protocol version.", aliases = {"/about"} },
+            { cmd = "/compat", desc = "Toggle older-client mode. BUGGY.", aliases = {"/legacy", "/oldclients"} },
+            { cmd = "/quiet", desc = "Toggle version warning noise filter." },
+            { cmd = "/app", desc = "Open app controls.", aliases = {"/controls"} },
+            { cmd = "/logout", desc = "Logout to the login screen." },
+            { cmd = "/exit", desc = "Close XenitChat.", aliases = {"/quit", "/close"} },
+            { cmd = "/restart", desc = "Restart XenitChat.", aliases = {"/reload"} },
+            { cmd = "/reboot", desc = "Reboot this CraftOS computer." }
+        }
+    }
+}
+
+function normalizeCommandName(value)
+    value = tostring(value or ""):lower():gsub("^/", "")
+    return value
+end
+
+function iterCommands()
+    local out = {}
+    for _, cat in ipairs(COMMAND_HELP) do
+        for _, item in ipairs(cat.items or {}) do
+            table.insert(out, item)
+        end
+    end
+    return out
+end
+
+function commandNames(item)
+    local names = { item.cmd }
+    for _, alias in ipairs(item.aliases or {}) do
+        table.insert(names, alias)
+    end
+    return names
+end
+
+function commandLine(item)
+    local args = item.args and (" " .. item.args) or ""
+    return item.cmd .. args .. " - " .. item.desc
+end
+
+function findCommandHelp(name)
+    name = normalizeCommandName(name)
+    if name == "" then return nil end
+    for _, item in ipairs(iterCommands()) do
+        if normalizeCommandName(item.cmd) == name then return item end
+        for _, alias in ipairs(item.aliases or {}) do
+            if normalizeCommandName(alias) == name then return item end
+        end
+    end
+    return nil
+end
+
+function suggestCommand(name)
+    name = normalizeCommandName(name)
+    if name == "" then return nil end
+    for _, item in ipairs(iterCommands()) do
+        for _, candidate in ipairs(commandNames(item)) do
+            local c = normalizeCommandName(candidate)
+            if c:sub(1, #name) == name or name:sub(1, #c) == c then
+                return item.cmd
+            end
+        end
+    end
+    return nil
+end
+
+function showHelpForCommand(name)
+    local item = findCommandHelp(name)
+    if not item then
+        local maybe = suggestCommand(name)
+        if maybe then
+            systemMessage("No command named /" .. normalizeCommandName(name) .. ". Did you mean " .. maybe .. "?")
+        else
+            systemMessage("No command named /" .. normalizeCommandName(name) .. ". Use /help for all commands.")
+        end
+        return
+    end
+
+    local usage = item.cmd .. (item.args and (" " .. item.args) or "")
+    systemMessage("Command: " .. usage)
+    systemMessage("  " .. item.desc)
+    if item.aliases and #item.aliases > 0 then
+        systemMessage("  Also: " .. table.concat(item.aliases, ", "))
+    end
+end
+
 local function handleSlashCommand(body)
     if body:sub(1, 1) ~= "/" then return false end
 
@@ -2041,8 +2178,12 @@ local function handleSlashCommand(body)
     command = command and command:lower() or ""
     rest = rest or ""
 
-    if command == "help" or command == "?" then
-        state.modal = "help"
+    if command == "help" or command == "?" or command == "commands" or command == "slash" or command == "shortcuts" then
+        if rest ~= "" then
+            showHelpForCommand(rest)
+        else
+            state.modal = "help"
+        end
     elseif command == "menu" then
         openMainMenu()
     elseif command == "chats" then
@@ -2094,27 +2235,43 @@ local function handleSlashCommand(body)
         end
         systemMessage("History sync requested from " .. tostring(count) .. " online peer(s).")
     elseif command == "join" then
-        if rest ~= "" then joinGroup(rest) else systemMessage("Usage: /join group_name") end
+        if rest ~= "" then joinGroup(rest:gsub("^#", "")) else systemMessage("Usage: /join #group") end
     elseif command == "new" or command == "group" then
-        if rest ~= "" then createGroup(rest, "public") else systemMessage("Usage: /new group_name") end
+        if rest ~= "" then createGroup(rest:gsub("^#", ""), "public") else systemMessage("Usage: /new #group") end
     elseif command == "rename" then
         if rest ~= "" then renameCurrentGroup(rest) else systemMessage("Usage: /rename new group name") end
     elseif command == "leave" then
         leaveCurrentGroup()
     elseif command == "info" or command == "chatsettings" then
         openGroupSettings()
-    elseif command == "pm" or command == "msg" then
-        local id, user = resolveUser(rest)
-        if id then openPM(id, user) else systemMessage("User not found online.") end
+    elseif command == "pm" or command == "msg" or command == "dm" then
+        if rest == "" then
+            showHelpForCommand("pm")
+        else
+            local id, user = resolveUser(rest)
+            if id then openPM(id, user) else systemMessage("User not found online. Try /people or /pm @shortid.") end
+        end
     elseif command == "add" or command == "friend" then
-        local id, user = resolveUser(rest)
-        if id and user then sendFriendRequest(id, user) else systemMessage("User not found online.") end
+        if rest == "" then
+            showHelpForCommand("friend")
+        else
+            local id, user = resolveUser(rest)
+            if id and user then sendFriendRequest(id, user) else systemMessage("User not found online. Try /people first, then /friend @name.") end
+        end
     elseif command == "block" then
-        local id, user = resolveUser(rest)
-        if id then blockUser(id, user) systemMessage("Blocked " .. displayName(user.username, id, user.profile) .. ".") else systemMessage("User not found online.") end
+        if rest == "" then
+            showHelpForCommand("block")
+        else
+            local id, user = resolveUser(rest)
+            if id then blockUser(id, user) systemMessage("Blocked " .. displayName(user.username, id, user.profile) .. ".") else systemMessage("User not found online. Try /people or /block @shortid.") end
+        end
     elseif command == "unblock" then
-        local id = resolveBlocked(rest)
-        if id then unblockUser(id) systemMessage("Unblocked " .. shortId(id) .. ".") else systemMessage("Blocked user not found.") end
+        if rest == "" then
+            showHelpForCommand("unblock")
+        else
+            local id = resolveBlocked(rest)
+            if id then unblockUser(id) systemMessage("Unblocked " .. shortId(id) .. ".") else systemMessage("Blocked user not found. Open /blocked to see the list.") end
+        end
     elseif command == "status" then
         state.profile.status = rest ~= "" and trim(rest, 40) or "Available"
         savePrefs()
@@ -2138,7 +2295,12 @@ local function handleSlashCommand(body)
     elseif command == "logout" then
         logout()
     else
-        systemMessage("Unknown command. Try /help.")
+        local maybe = suggestCommand(command)
+        if maybe then
+            systemMessage("Unknown command /" .. command .. ". Did you mean " .. maybe .. "? Use /help " .. maybe:sub(2) .. " for details.")
+        else
+            systemMessage("Unknown command /" .. command .. ". Use /help for the command list.")
+        end
     end
 
     state.input = ""
@@ -3304,31 +3466,46 @@ local function drawChatsModal()
 end
 
 local function drawHelpModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 54, isPocket() and 13 or 15)
+    local mx, my, mw, mh = modalBox(isPocket() and w or 62, isPocket() and 15 or 19)
 
-    modalHeader(mx, my, mw, "Help / shortcuts", nil)
+    modalHeader(mx, my, mw, "Slash commands", "/help command for details")
 
     local lines = {
-        "ENTER send   TAB next chat   ESC close",
-        "/menu  /chats  /people  /inbox",
-        "/pm name-or-id     /friend name-or-id",
-        "/join group        /new group",
-        "/rename name       /leave       /info",
-        "/status text       /name display-name",
-        "/discover          /theme        /sync",
-        "/who  /id  /version  /readall  /pin",
-        "/quiet  /compat buggy old-client mode",
-        "/block name        /unblock name",
-        "/update            /update install",
-        "/clear   /logout   /exit   /restart",
-        "Chat mark: ^ pinned. People: * friend, ! request, ? sent",
-        "Groups: rename is shared; leave stops auto rejoin.",
-        "Pocket: use Chats + Menu; avoid tiny buttons."
+        "Type commands exactly like Discord: /pm @user, /join #group",
+        "ENTER send   TAB next chat   ESC close"
     }
 
+    for _, cat in ipairs(COMMAND_HELP) do
+        table.insert(lines, "")
+        table.insert(lines, cat.title)
+        for _, item in ipairs(cat.items or {}) do
+            local args = item.args and (" " .. item.args) or ""
+            table.insert(lines, "  " .. item.cmd .. args .. "  -  " .. item.desc)
+        end
+    end
+
+    table.insert(lines, "")
+    table.insert(lines, "People marks: * friend, ! request, ? sent. Chat mark: ^ pinned.")
+
     local maxRows = mh - 4
+    local y = my + 2
     for i = 1, math.min(#lines, maxRows) do
-        text(mx + 1, my + 1 + i, trim(lines[i], mw - 2), colors.black, colors.lightGray)
+        local line = lines[i]
+        local col = colors.black
+        if line == "" then
+            -- spacing row
+        elseif line:find("^  /") then
+            col = colors.black
+        elseif not line:find("^%s") and not line:find("^/") then
+            col = T().top
+        end
+        text(mx + 1, y, trim(line, mw - 2), col, colors.lightGray)
+        y = y + 1
+    end
+
+    local total = #lines
+    if total > maxRows then
+        text(mx + 1, my + mh - 2, trim("Showing " .. tostring(maxRows) .. "/" .. tostring(total) .. ". Use /help <command> for more.", mw - 10), colors.gray, colors.lightGray)
     end
 
     addButton("help_close", mx + mw - 8, my + mh - 1, 8, "Close", colors.white, colors.gray, function()

@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "19.2.2",
+    version = "19.2.6",
     protocolVersion = 19,
     protocolName = "Obsidian",
     protocol = "xenitchat_bus",
@@ -233,8 +233,9 @@ local state = {
     versionNoticeLast = {},
     pinned = {},
     quietVersionWarnings = true,
-    allowOldClients = false,
-    legacyCompatMode = "off",
+    allowOldClients = true,
+    legacyCompatMode = "v15",
+    useSystemSlashChannel = true,
     modalPositions = {},
     draggingModal = nil,
     showOldClientTags = true,
@@ -622,11 +623,21 @@ end
 LEGACY_COMPAT_MODES = {
     off = { label = "Off", target = nil, plain = false, accept = false },
     accept = { label = "Accept old packets only", target = nil, plain = false, accept = true },
-    v7 = { label = "Classic v7 mirror (BUGGY)", target = 7, plain = true, accept = true },
-    v19_plain = { label = "v19 plain/no codename (BUGGY)", target = 19, plain = true, accept = true }
+    generic = { label = "Generic legacy mirror (BUGGY)", target = 15, plain = true, accept = true },
+    v7 = { label = "Known v7 mirror (BUGGY)", target = 7, plain = true, accept = true },
+    v8 = { label = "Known v8 mirror (BUGGY)", target = 8, plain = true, accept = true },
+    v10 = { label = "Known v10 mirror (BUGGY)", target = 10, plain = true, accept = true },
+    v12 = { label = "Known v12 mirror (BUGGY)", target = 12, plain = true, accept = true },
+    v14 = { label = "Known v14 mirror (BUGGY)", target = 14, plain = true, accept = true },
+    v15 = { label = "Known v15 mirror (BUGGY)", target = 15, plain = true, accept = true },
+    v16 = { label = "Known v16 mirror (BUGGY)", target = 16, plain = true, accept = true },
+    v17 = { label = "Known v17 mirror (BUGGY)", target = 17, plain = true, accept = true },
+    v18 = { label = "Known v18 mirror (BUGGY)", target = 18, plain = true, accept = true },
+    v19_plain = { label = "v19 plain/no codename (BUGGY)", target = 19, plain = true, accept = true },
+    v19_quartz = { label = "Quartz v19 legacy (BUGGY)", target = 19, plain = false, accept = true, protocolName = "Quartz" }
 }
 
-LEGACY_COMPAT_ORDER = { "off", "accept", "v7", "v19_plain" }
+LEGACY_COMPAT_ORDER = { "off", "accept", "generic", "v15", "v18", "v17", "v16", "v14", "v12", "v10", "v8", "v7", "v19_plain", "v19_quartz" }
 
 function legacyCompatInfo()
     return LEGACY_COMPAT_MODES[state.legacyCompatMode or "accept"] or LEGACY_COMPAT_MODES.accept
@@ -650,7 +661,7 @@ end
 function shouldMirrorForLegacy(kind)
     local v = legacyMirrorVersion()
     if not v then return false end
-    if v == protocolVersion() and state.legacyCompatMode ~= "v19_plain" then return false end
+    if v == protocolVersion() and state.legacyCompatMode ~= "v19_plain" and state.legacyCompatMode ~= "v19_quartz" then return false end
     return kind == "hello" or kind == "hello_ack" or kind == "chat" or kind == "pm" or kind == "read" or kind == "channel_create" or kind == "channel_rename" or kind == "join" or kind == "friend_request" or kind == "friend_accept" or kind == "friend_decline" or kind == "friend_cancel" or kind == "unfriend"
 end
 
@@ -778,8 +789,9 @@ local function defaultPrefs()
         leftGroups = {},
         pinned = {},
         quietVersionWarnings = true,
-        allowOldClients = false,
-        legacyCompatMode = "off",
+        allowOldClients = true,
+        legacyCompatMode = "v15",
+        useSystemSlashChannel = true,
         showOldClientTags = true,
         suppressRemoteVersionWarnings = true,
         showTimestamps = true,
@@ -827,6 +839,7 @@ local function savePrefs()
         quietVersionWarnings = state.quietVersionWarnings,
         allowOldClients = state.allowOldClients,
         legacyCompatMode = state.legacyCompatMode,
+        useSystemSlashChannel = state.useSystemSlashChannel,
         showOldClientTags = state.showOldClientTags,
         suppressRemoteVersionWarnings = state.suppressRemoteVersionWarnings,
         showTimestamps = state.showTimestamps,
@@ -864,8 +877,10 @@ local function loadPrefs()
     if type(data.leftGroups) ~= "table" then data.leftGroups = {} end
     if type(data.pinned) ~= "table" then data.pinned = {} end
     if type(data.quietVersionWarnings) ~= "boolean" then data.quietVersionWarnings = true end
-    if type(data.allowOldClients) ~= "boolean" then data.allowOldClients = false end
-    if data.legacyCompatMode ~= "accept" and data.legacyCompatMode ~= "v7" and data.legacyCompatMode ~= "v19_plain" and data.legacyCompatMode ~= "off" then data.legacyCompatMode = data.allowOldClients and "accept" or "off" end
+    if type(data.allowOldClients) ~= "boolean" then data.allowOldClients = true end
+    if not LEGACY_COMPAT_MODES[data.legacyCompatMode or "v15"] then data.legacyCompatMode = data.allowOldClients and "v15" or "off" end
+    if data.legacyCompatMode == nil then data.legacyCompatMode = "v15" end
+    if type(data.useSystemSlashChannel) ~= "boolean" then data.useSystemSlashChannel = true end
     if type(data.showOldClientTags) ~= "boolean" then data.showOldClientTags = true end
     if type(data.suppressRemoteVersionWarnings) ~= "boolean" then data.suppressRemoteVersionWarnings = true end
     if type(data.showTimestamps) ~= "boolean" then data.showTimestamps = true end
@@ -897,6 +912,7 @@ local function loadPrefs()
     state.quietVersionWarnings = data.quietVersionWarnings
     state.allowOldClients = data.allowOldClients
     state.legacyCompatMode = data.legacyCompatMode
+    state.useSystemSlashChannel = data.useSystemSlashChannel
     state.showOldClientTags = data.showOldClientTags
     state.suppressRemoteVersionWarnings = data.suppressRemoteVersionWarnings
     state.showTimestamps = data.showTimestamps
@@ -918,6 +934,20 @@ local function loadPrefs()
 
     if not state.convos.global then
         state.convos.global = defaultPrefs().convos.global
+    end
+
+    if not state.convos.system then
+        state.convos.system = {
+            key = "system",
+            title = "system",
+            type = "system",
+            private = true,
+            listed = false,
+            owner = "local",
+            unread = 0,
+            last = 0,
+            localOnly = true
+        }
     end
 end
 
@@ -1102,8 +1132,26 @@ local function addMessage(key, from, body, kind, meta)
     return true
 end
 
+local function ensureSystemChannel()
+    ensureConvo("system", "system", "system", true, false, "local")
+    if state.convos.system then
+        state.convos.system.localOnly = true
+        state.convos.system.listed = false
+        state.convos.system.private = true
+    end
+end
+
+local function commandOutputKey(key)
+    if key then return key end
+    if state._slashCommandActive and state.useSystemSlashChannel ~= false then
+        ensureSystemChannel()
+        return "system"
+    end
+    return state.current
+end
+
 local function systemMessage(body, key)
-    addMessage(key or state.current, "system", body, "system")
+    addMessage(commandOutputKey(key), "system", body, "system")
 end
 
 local function isHistorySyncable(key, publicId)
@@ -1802,8 +1850,18 @@ function makeLegacyPacket(kind, data)
     copy.compatMirror = true
     copy.sourceProtocolVersion = protocolVersion()
     copy.sourceAppVersion = appVersion()
-    local plain = legacyCompatInfo().plain == true
-    return makePacket(kind, copy, target, plain)
+    -- IMPORTANT: legacy mirrors must use a different packetId from the modern packet.
+    -- Older clients dedupe by publicId:packetId before they check version. If the
+    -- modern v19 packet and the v15 mirror share the same packetId, old v15 clients
+    -- see the modern packet first, mark it as seen, then drop the valid mirror.
+    copy.packetId = "legacy-" .. randomToken(12)
+    local info = legacyCompatInfo()
+    local plain = info.plain == true
+    local packet = makePacket(kind, copy, target, plain)
+    if info.protocolName and not plain then
+        packet.protocolName = info.protocolName
+    end
+    return packet
 end
 
 local function broadcast(kind, data)
@@ -2240,7 +2298,7 @@ function cycleLegacyCompatMode()
     state.legacyCompatMode = LEGACY_COMPAT_ORDER[pos]
     state.allowOldClients = state.legacyCompatMode ~= "off"
     savePrefs()
-    systemMessage("Old-client compatibility: " .. legacyCompatLabel() .. (state.allowOldClients and " (BUGGY)." or "."))
+    systemMessage("Old-client compatibility: " .. legacyCompatLabel() .. (state.allowOldClients and " (BUGGY). Use v15 for your old v15 client; Generic also targets v15; Quartz is for older v19 Quartz clients." or "."))
 end
 
 local function showVersionInfo()
@@ -2609,7 +2667,7 @@ COMMAND_HELP = {
             { cmd = "/sync", desc = "Request chat history sync.", aliases = {"/history"} },
             { cmd = "/update", args = "[check|install|force]", desc = "Check or install GitHub update." },
             { cmd = "/version", desc = "Show app/protocol version.", aliases = {"/about"} },
-            { cmd = "/compat", desc = "Cycle old-client compatibility dropdown. BUGGY.", aliases = {"/legacy", "/oldclients"} },
+            { cmd = "/compat", desc = "Cycle old-client target: Generic, v15, v18, v7, v19 plain. BUGGY.", aliases = {"/legacy", "/oldclients"} },
             { cmd = "/quiet", desc = "Toggle version warning noise filter." },
             { cmd = "/privacy", desc = "Cycle DM privacy: anyone, friends-only, no DMs." },
             { cmd = "/audit", desc = "Run a quick security audit." },
@@ -2703,6 +2761,7 @@ local function handleSlashCommand(body)
     local command, rest = body:match("^/(%S+)%s*(.*)$")
     command = command and command:lower() or ""
     rest = rest or ""
+    state._slashCommandActive = true
 
     if command == "help" or command == "?" or command == "commands" or command == "slash" or command == "shortcuts" then
         if rest ~= "" then
@@ -2874,6 +2933,7 @@ local function handleSlashCommand(body)
     end
 
     state.input = ""
+    state._slashCommandActive = false
     return true
 end
 
@@ -3398,6 +3458,7 @@ local function modalDivider(mx, y, mw)
 end
 
 local function modalBox(width, height, modalKey)
+    modalKey = modalKey or state.modal or "modal"
     local marginX = w <= 30 and 0 or 2
     local marginY = h <= 14 and 0 or 1
     local maxW = math.max(1, w - marginX * 2)
@@ -3925,6 +3986,12 @@ local function drawSettingsModal()
     end)
     y = y + 1
 
+    addButton("set_slashsystem", mx + 1, y, mw - 2, "Slash output to #system: " .. onoff(state.useSystemSlashChannel ~= false), colors.black, state.useSystemSlashChannel ~= false and T().good or colors.white, function()
+        toggleBoolSetting("useSystemSlashChannel", "Slash output to #system")
+        ensureSystemChannel()
+    end)
+    y = y + 1
+
     addButton("set_friendnote", mx + 1, y, mw - 2, "Friend notifications: " .. onoff(state.friendNotifications ~= false), colors.black, state.friendNotifications ~= false and T().good or colors.white, function()
         toggleBoolSetting("friendNotifications", "Friend notifications")
     end)
@@ -3964,7 +4031,7 @@ local function drawSettingsModal()
     y = y + 1
 
     local quietLabel = state.quietVersionWarnings and "Quiet version spam: ON" or "Quiet version spam: OFF"
-    local oldLabel = "Old-client mode: " .. legacyCompatLabel()
+    local oldLabel = "Old-client dropdown: " .. legacyCompatLabel()
 
     addButton("set_quiet", mx + 1, y, mw - 2, quietLabel, colors.black, state.quietVersionWarnings and T().good or colors.gray, toggleQuietVersionWarnings)
     y = y + 1
@@ -4043,7 +4110,7 @@ end
 local function drawMainMenuModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 44, isPocket() and 14 or 15, "main_menu")
 
-    modalHeader(mx, my, mw, "Menu", trim(currentChatTitle() .. "  |  /help  |  drag title", mw - 2))
+    modalHeader(mx, my, mw, "Menu", trim(currentChatTitle() .. "  |  /help  |  drag header", mw - 2))
 
     local items = {
         { "Chats", openChatsModal, T().good, colors.black },
@@ -5118,13 +5185,18 @@ end
 
 
 function beginModalDrag(x, y)
-    if state.modal ~= "main_menu" then return false end
+    if not state.modal then return false end
     local b = state.activeModalBox
-    if not b or b.key ~= "main_menu" then return false end
-    if y == b.y and x >= b.x and x <= b.x + b.w - 1 and x < b.x + b.w - 3 then
-        state.draggingModal = { key = "main_menu", dx = x - b.x, dy = y - b.y }
+    if not b or not b.key then return false end
+
+    -- Every modal/menu can be dragged by its header/title bar.
+    -- Leave the right edge alone so the X close button remains easy to click.
+    local closeZoneStart = b.x + b.w - 3
+    if y == b.y and x >= b.x and x <= b.x + b.w - 1 and x < closeZoneStart then
+        state.draggingModal = { key = b.key, dx = x - b.x, dy = y - b.y }
         return true
     end
+
     return false
 end
 

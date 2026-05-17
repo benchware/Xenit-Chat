@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = 12,
+    version = 13,
     protocol = "xenitchat_bus",
     updateUrl = "https://raw.githubusercontent.com/benchware/Xenit-Chat/main/xenitchat.lua",
 
@@ -1880,6 +1880,55 @@ function logout()
     end
 end
 
+
+-- ============================================================
+-- Buffered rendering (reduces CraftOS-PC flicker)
+-- ============================================================
+
+local renderBuffer = {
+    parent = nil,
+    win = nil,
+    width = 0,
+    height = 0
+}
+
+local function beginBufferedDraw()
+    if type(window) ~= "table" or type(window.create) ~= "function" then
+        return nil, nil
+    end
+
+    if type(term.current) ~= "function" or type(term.redirect) ~= "function" then
+        return nil, nil
+    end
+
+    local parent = term.current()
+    local tw, th = term.getSize()
+
+    if not renderBuffer.win or renderBuffer.parent ~= parent or renderBuffer.width ~= tw or renderBuffer.height ~= th then
+        renderBuffer.parent = parent
+        renderBuffer.width = tw
+        renderBuffer.height = th
+        renderBuffer.win = window.create(parent, 1, 1, tw, th, false)
+    end
+
+    if renderBuffer.win and type(renderBuffer.win.setVisible) == "function" then
+        renderBuffer.win.setVisible(false)
+    end
+
+    term.redirect(renderBuffer.win)
+    return parent, renderBuffer.win
+end
+
+local function endBufferedDraw(parent, win)
+    if parent then
+        term.redirect(parent)
+    end
+
+    if win and type(win.setVisible) == "function" then
+        win.setVisible(true)
+    end
+end
+
 -- ============================================================
 -- Draw login
 -- ============================================================
@@ -2911,8 +2960,12 @@ local function drawChat()
     end
 end
 
-local function draw()
+local function drawScene()
     w, h = term.getSize()
+
+    if type(term.setCursorBlink) == "function" then
+        term.setCursorBlink(false)
+    end
 
     if w < 24 or h < 12 then
         clear()
@@ -2927,6 +2980,16 @@ local function draw()
         drawLogin(true)
     elseif state.screen == "chat" then
         drawChat()
+    end
+end
+
+local function draw()
+    local parent, win = beginBufferedDraw()
+    local ok, err = pcall(drawScene)
+    endBufferedDraw(parent, win)
+
+    if not ok then
+        error(err, 0)
     end
 end
 
@@ -3383,6 +3446,7 @@ end
 
 local function boot()
     clear()
+    if type(term.setCursorBlink) == "function" then term.setCursorBlink(false) end
     openModem()
     loadPrefs()
     tryRememberLogin()

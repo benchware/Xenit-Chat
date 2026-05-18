@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "20.0.4",
+    version = "20.0.6",
     protocolVersion = 19,
     protocolName = "Aegis",
     protocol = "xenitchat_bus",
@@ -283,6 +283,11 @@ local state = {
     updateBranchesStatus = "fallback",
     updateBranch = "main",
     updateCustomBranch = "",
+    notifyUpdates = true,
+    updateMetaCache = {},
+    updateMetaOrder = {},
+    updateLastScan = {},
+    helpPage = 1,
     slashOpenedSystemOutput = false,
     lastDragDrawClock = 0,
     showOldClientTags = true,
@@ -872,6 +877,10 @@ local function defaultPrefs()
         legacyCompatMode = "v15",
         updateBranch = "main",
         updateCustomBranch = "",
+        notifyUpdates = true,
+        updateMetaCache = {},
+        updateMetaOrder = {},
+        updateLastScan = {},
         useSystemSlashChannel = true,
         showOldClientTags = true,
         suppressRemoteVersionWarnings = true,
@@ -930,6 +939,10 @@ local function savePrefs()
         legacyCompatMode = state.legacyCompatMode,
         updateBranch = state.updateBranch,
         updateCustomBranch = state.updateCustomBranch,
+        notifyUpdates = state.notifyUpdates,
+        updateMetaCache = state.updateMetaCache,
+        updateMetaOrder = state.updateMetaOrder,
+        updateLastScan = state.updateLastScan,
         useSystemSlashChannel = state.useSystemSlashChannel,
         showOldClientTags = state.showOldClientTags,
         suppressRemoteVersionWarnings = state.suppressRemoteVersionWarnings,
@@ -981,6 +994,10 @@ local function loadPrefs()
     if data.legacyCompatMode == nil then data.legacyCompatMode = "v15" end
     if type(data.updateBranch) ~= "string" or data.updateBranch == "" then data.updateBranch = "main" end
     if type(data.updateCustomBranch) ~= "string" then data.updateCustomBranch = "" end
+    if type(data.notifyUpdates) ~= "boolean" then data.notifyUpdates = true end
+    if type(data.updateMetaCache) ~= "table" then data.updateMetaCache = {} end
+    if type(data.updateMetaOrder) ~= "table" then data.updateMetaOrder = {} end
+    if type(data.updateLastScan) ~= "table" then data.updateLastScan = {} end
     if type(data.useSystemSlashChannel) ~= "boolean" then data.useSystemSlashChannel = true end
     if type(data.showOldClientTags) ~= "boolean" then data.showOldClientTags = true end
     if type(data.suppressRemoteVersionWarnings) ~= "boolean" then data.suppressRemoteVersionWarnings = true end
@@ -1025,6 +1042,10 @@ local function loadPrefs()
     state.legacyCompatMode = data.legacyCompatMode
     state.updateBranch = data.updateBranch
     state.updateCustomBranch = data.updateCustomBranch
+    state.notifyUpdates = data.notifyUpdates
+    state.updateMetaCache = data.updateMetaCache
+    state.updateMetaOrder = data.updateMetaOrder
+    state.updateLastScan = data.updateLastScan
     state.useSystemSlashChannel = data.useSystemSlashChannel
     state.showOldClientTags = data.showOldClientTags
     state.suppressRemoteVersionWarnings = data.suppressRemoteVersionWarnings
@@ -1263,7 +1284,13 @@ local function ensureSystemChannel()
 end
 
 local function commandOutputKey(key)
-    if key then return key end
+    if key then
+        if key == "system" and state._slashCommandActive and state.useSystemSlashChannel ~= false then
+            ensureSystemChannel()
+            state.slashOpenedSystemOutput = true
+        end
+        return key
+    end
     if state._slashCommandActive and state.useSystemSlashChannel ~= false then
         ensureSystemChannel()
         state.slashOpenedSystemOutput = true
@@ -2094,21 +2121,21 @@ end
 
 function refreshUpdateBranches(silent, targetKey)
     if not httpRead then
-        if not silent then systemMessage("Branch refresh unavailable until updater is loaded.", targetKey) end
+        if not silent then systemMessage("Branch refresh unavailable until updater is loaded.", targetKey or "system") end
         return false
     end
 
     local raw, err = httpRead(githubBranchesApiUrl())
     if not raw then
         state.updateBranchesStatus = "fallback"
-        if not silent then systemMessage("Branch refresh failed: " .. tostring(err) .. ". Using fallback branches.", targetKey) end
+        if not silent then systemMessage("Branch refresh failed: " .. tostring(err) .. ". Using fallback branches.", targetKey or "system") end
         return false
     end
 
     local branches = parseGitHubBranches(raw)
     if #branches == 0 then
         state.updateBranchesStatus = "fallback"
-        if not silent then systemMessage("Branch refresh failed: no branches found. Using fallback branches.", targetKey) end
+        if not silent then systemMessage("Branch refresh failed: no branches found. Using fallback branches.", targetKey or "system") end
         return false
     end
 
@@ -2118,7 +2145,7 @@ function refreshUpdateBranches(silent, targetKey)
     if not silent then
         local names = {}
         for i, item in ipairs(branches) do names[i] = item.key end
-        systemMessage("GitHub branches loaded: " .. table.concat(names, ", "), targetKey)
+        systemMessage("GitHub branches loaded: " .. table.concat(names, ", "), targetKey or "system")
     end
     return true
 end
@@ -2190,6 +2217,9 @@ function openUpdateBranchDropdown()
     state.modal = "update_branch"
     state.modalInput = ""
     state.branchScroll = 0
+    if (not state.updateBranchesRemote or #state.updateBranchesRemote == 0) and httpRead then
+        refreshUpdateBranches(true, "system")
+    end
 end
 
 function openCustomUpdateBranchModal()
@@ -2198,8 +2228,68 @@ function openCustomUpdateBranchModal()
 end
 
 function showUpdateBranchInfo()
-    systemMessage("Updater branch: " .. updateBranchLabel())
-    systemMessage("Updater URL: " .. updateUrlForBranch(selectedUpdateBranch()))
+    systemMessage("Updater branch: " .. updateBranchLabel(), "system")
+    systemMessage("Updater URL: " .. updateUrlForBranch(selectedUpdateBranch()), "system")
+    local meta = state.updateMetaCache and state.updateMetaCache[selectedUpdateBranch()]
+    if meta then
+        systemMessage("Last known on this branch: v" .. tostring(meta.version) .. " from " .. tostring(meta.source or "local/GitHub") .. ".", "system")
+    end
+end
+
+function rememberUpdateMeta(branch, version, source, fromId)
+    branch = sanitizeUpdateBranch(branch or "main")
+    if not version or tostring(version) == "" then return end
+    state.updateMetaCache = state.updateMetaCache or {}
+    state.updateMetaOrder = state.updateMetaOrder or {}
+
+    local existing = state.updateMetaCache[branch]
+    local isNewer = (not existing) or compareVersions(tostring(version), tostring(existing.version or "0")) > 0
+    state.updateMetaCache[branch] = {
+        branch = branch,
+        version = tostring(version),
+        source = tostring(source or "peer"),
+        fromId = fromId,
+        seen = os.time()
+    }
+
+    local found = false
+    for _, b in ipairs(state.updateMetaOrder) do
+        if b == branch then found = true break end
+    end
+    if not found then table.insert(state.updateMetaOrder, branch) end
+    while #state.updateMetaOrder > 20 do
+        local old = table.remove(state.updateMetaOrder, 1)
+        state.updateMetaCache[old] = nil
+    end
+
+    if isNewer and state.notifyUpdates ~= false and compareVersions(tostring(version), appVersion()) > 0 then
+        systemMessage("Update metadata: v" .. tostring(version) .. " is known on branch " .. branch .. " (from " .. tostring(source or "peer") .. ").", "system")
+    end
+    savePrefs()
+end
+
+function shareUpdateMeta(branch, version)
+    if not state.username or not state.publicId then return end
+    if not branch or not version then return end
+    broadcast("update_meta", {
+        branch = sanitizeUpdateBranch(branch),
+        remoteVersion = tostring(version),
+        localVersion = appVersion(),
+        source = myName()
+    })
+end
+
+function updateMetaSummaryLines()
+    local lines = {}
+    state.updateMetaCache = state.updateMetaCache or {}
+    state.updateMetaOrder = state.updateMetaOrder or {}
+    for _, branch in ipairs(state.updateMetaOrder) do
+        local meta = state.updateMetaCache[branch]
+        if meta then
+            table.insert(lines, branch .. ": v" .. tostring(meta.version) .. " (" .. tostring(meta.source or "peer") .. ")")
+        end
+    end
+    return lines
 end
 
 -- ============================================================
@@ -2269,7 +2359,8 @@ end
 local function installUpdate(raw, remoteVersion, targetKey)
     local path = getProgramPath()
     local backup = path .. ".bak"
-    targetKey = targetKey or state.current or "global"
+    targetKey = targetKey or "system"
+    if targetKey == "system" then ensureSystemChannel() end
 
     if fs.exists(path) then
         local current = readText(path) or ""
@@ -2281,8 +2372,55 @@ local function installUpdate(raw, remoteVersion, targetKey)
     systemMessage("Backup saved as " .. backup, targetKey)
 end
 
+function fetchUpdateVersionForBranch(branch)
+    branch = sanitizeUpdateBranch(branch or selectedUpdateBranch())
+    local raw, err = httpRead(updateUrlForBranch(branch))
+    if not raw then return nil, err, nil end
+    local remoteVersion = parseRemoteVersion(raw)
+    if not remoteVersion then return nil, "could not read remote version", raw end
+    rememberUpdateMeta(branch, remoteVersion, "GitHub")
+    shareUpdateMeta(branch, remoteVersion)
+    return remoteVersion, nil, raw
+end
+
+function scanUpdateBranches(targetKey, includeMessages)
+    targetKey = targetKey or "system"
+    if (not state.updateBranchesRemote or #state.updateBranchesRemote == 0) and httpRead then
+        refreshUpdateBranches(true, targetKey)
+    end
+
+    local branches = getUpdateBranches()
+    local scanned = 0
+    local newestBranch, newestVersion = nil, nil
+
+    for _, item in ipairs(branches) do
+        if item.key ~= "custom" then
+            local branch = sanitizeUpdateBranch(item.branch or item.key)
+            local version = fetchUpdateVersionForBranch(branch)
+            if version then
+                scanned = scanned + 1
+                if not newestVersion or compareVersions(tostring(version), tostring(newestVersion)) > 0 then
+                    newestVersion = tostring(version)
+                    newestBranch = branch
+                end
+            end
+        end
+    end
+
+    if includeMessages then
+        if scanned == 0 then
+            systemMessage("Update scan: no branch version could be read.", targetKey)
+        else
+            systemMessage("Update scan: checked " .. tostring(scanned) .. " branch(es). Newest known: " .. tostring(newestBranch) .. " v" .. tostring(newestVersion) .. ".", targetKey)
+        end
+    end
+
+    return newestBranch, newestVersion, scanned
+end
+
 local function checkForUpdate(auto, install, force, targetKey)
-    targetKey = targetKey or state.current or "global"
+    targetKey = targetKey or "system"
+    if targetKey == "system" then ensureSystemChannel() end
 
     if state.updateBusy then
         if not auto then systemMessage("Update check already running.", targetKey) end
@@ -2295,21 +2433,28 @@ local function checkForUpdate(auto, install, force, targetKey)
         systemMessage("Checking GitHub branch " .. updateBranchLabel() .. " for updates...", targetKey)
     end
 
+    if (not state.updateBranchesRemote or #state.updateBranchesRemote == 0) and httpRead then
+        refreshUpdateBranches(true, targetKey)
+    end
+
     local branch = selectedUpdateBranch()
     local updateUrl = updateUrlForBranch(branch)
     APP.updateUrl = updateUrl
-    local raw, err = httpRead(updateUrl)
+    local remoteVersion, err, raw = fetchUpdateVersionForBranch(branch)
     if not raw then
         if not auto then systemMessage("Update failed: " .. tostring(err), targetKey) end
         state.updateBusy = false
         return
     end
 
-    local remoteVersion = parseRemoteVersion(raw)
     if not remoteVersion then
-        if not auto then systemMessage("Update failed: could not read remote version.", targetKey) end
+        if not auto then systemMessage("Update failed: " .. tostring(err or "could not read remote version"), targetKey) end
         state.updateBusy = false
         return
+    end
+
+    if not auto then
+        scanUpdateBranches(targetKey, true)
     end
 
     local cmp = compareVersions(remoteVersion, appVersion())
@@ -2546,7 +2691,7 @@ end
 local function listOnlineUsers()
     local list = getSortedUsers()
     if #list == 0 then
-        systemMessage("No online users found.")
+        systemMessage("No online users found.", "system")
         return
     end
 
@@ -2560,7 +2705,7 @@ local function listOnlineUsers()
         table.insert(names, "+" .. tostring(#list - #names) .. " more")
     end
 
-    systemMessage("Online: " .. table.concat(names, ", "))
+    systemMessage("Online: " .. table.concat(names, ", "), "system")
 end
 
 local function resolveBlocked(value)
@@ -2579,7 +2724,7 @@ local function resolveBlocked(value)
 end
 
 local function showMyId()
-    systemMessage("Your ID: " .. shortId(state.publicId) .. "  | Protocol " .. protocolName() .. "/" .. tostring(protocolVersion()))
+    systemMessage("Your ID: " .. shortId(state.publicId) .. "  | Protocol " .. protocolName() .. "/" .. tostring(protocolVersion()), "system")
 end
 
 local function toggleQuietVersionWarnings()
@@ -2617,7 +2762,7 @@ function openCompatDropdown()
 end
 
 local function showVersionInfo()
-    systemMessage("XenitChat v" .. appVersion() .. " | Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()) .. " | old-client mode: " .. legacyCompatLabel())
+    systemMessage("XenitChat v" .. appVersion() .. " | Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()) .. " | old-client mode: " .. legacyCompatLabel(), "system")
 end
 
 
@@ -2892,25 +3037,25 @@ function showSecurityAudit()
     for _ in pairs(state.muted or {}) do muted = muted + 1 end
     for _ in pairs(state.trusted or {}) do trusted = trusted + 1 end
     for _ in pairs(state.blocked or {}) do blocked = blocked + 1 end
-    systemMessage("Security audit: DM=" .. dmPrivacyLabel() .. ", muted=" .. muted .. ", trusted=" .. trusted .. ", blocked=" .. blocked .. ".")
-    systemMessage("History sharing requires friends: " .. ((state.requireFriendForHistory and "ON") or "OFF") .. " | Auto-block flood: " .. ((state.autoBlockFlood and "ON") or "OFF"))
+    systemMessage("Security audit: DM=" .. dmPrivacyLabel() .. ", muted=" .. muted .. ", trusted=" .. trusted .. ", blocked=" .. blocked .. ".", "system")
+    systemMessage("History sharing requires friends: " .. ((state.requireFriendForHistory and "ON") or "OFF") .. " | Auto-block flood: " .. ((state.autoBlockFlood and "ON") or "OFF"), "system")
 end
 
 function showPeerStatus()
     local list = getSortedUsers()
     if #list == 0 then
-        systemMessage("No P2P peers online yet. Try /ping @everyone or wait for hello packets.")
+        systemMessage("No P2P peers online yet. Try /ping @everyone or wait for hello packets.", "system")
         return
     end
-    systemMessage("P2P peers: " .. tostring(#list) .. " online/known | compatibility: " .. legacyCompatLabel())
+    systemMessage("P2P peers: " .. tostring(#list) .. " online/known | compatibility: " .. legacyCompatLabel(), "system")
     for i = 1, math.min(#list, 8) do
         local u = list[i]
         local info = state.users[u.publicId] or u
         local rv = tostring(info.remoteAppVersion or info.remoteVersion or "?")
         local rp = tostring(info.remoteProtocolName or "no-codename")
-        systemMessage(" - " .. displayName(info.username, u.publicId, info.profile) .. " | v" .. rv .. " | " .. rp .. " | id #" .. shortId(u.publicId))
+        systemMessage(" - " .. displayName(info.username, u.publicId, info.profile) .. " | v" .. rv .. " | " .. rp .. " | id #" .. shortId(u.publicId), "system")
     end
-    if #list > 8 then systemMessage("...and " .. tostring(#list - 8) .. " more peer(s).") end
+    if #list > 8 then systemMessage("...and " .. tostring(#list - 8) .. " more peer(s).", "system") end
 end
 
 function backupLocalData()
@@ -3401,7 +3546,7 @@ COMMAND_HELP = {
         title = "System",
         items = {
             { cmd = "/sync", desc = "Request chat history sync.", aliases = {"/history"} },
-            { cmd = "/update", args = "[check|install|force|branch <name>]", desc = "Check/install GitHub update from selected branch." },
+            { cmd = "/update", args = "[check|install|force|branch <name>]", desc = "Check/install GitHub update from selected branch and scan branch metadata." },
             { cmd = "/branch", args = "[name|refresh]", desc = "Choose or refresh GitHub branches for updater." },
             { cmd = "/version", desc = "Show app/protocol version.", aliases = {"/about"} },
             { cmd = "/compat", desc = "Cycle old-client target: Generic, v15, v18, v7, v19 plain. BUGGY.", aliases = {"/legacy", "/oldclients"} },
@@ -3506,6 +3651,7 @@ local function handleSlashCommand(body)
         if rest ~= "" then
             showHelpForCommand(rest)
         else
+            state.helpPage = 1
             state.modal = "help"
         end
     elseif command == "menu" then
@@ -3533,25 +3679,25 @@ local function handleSlashCommand(body)
     elseif command == "update" then
         local mode = rest:lower()
         if mode == "install" or mode == "now" then
-            checkForUpdate(false, true, false, nil)
+            checkForUpdate(false, true, false, "system")
         elseif mode == "force" then
-            checkForUpdate(false, true, true, nil)
+            checkForUpdate(false, true, true, "system")
         elseif mode:match("^branch%s+") then
             local br = rest:match("^%S+%s+(.+)$") or ""
             setUpdateBranch("custom", br)
             systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
         elseif mode == "branch refresh" or mode == "branches refresh" or mode == "refresh branches" then
-            refreshUpdateBranches(false, nil)
+            refreshUpdateBranches(false, "system")
             openUpdateBranchDropdown()
         elseif mode == "branch" or mode == "branches" then
             openUpdateBranchDropdown()
         else
-            checkForUpdate(false, false, false, nil)
+            checkForUpdate(false, false, false, "system")
         end
     elseif command == "branch" or command == "branches" then
         local lowerRest = rest:lower()
         if lowerRest == "refresh" or lowerRest == "reload" or lowerRest == "scan" then
-            refreshUpdateBranches(false, nil)
+            refreshUpdateBranches(false, "system")
             openUpdateBranchDropdown()
         elseif rest ~= "" then
             setUpdateBranch("custom", rest)
@@ -3917,7 +4063,7 @@ local function finishLogin(username, account, remembered)
 
     if not state.updateChecked then
         state.updateChecked = true
-        checkForUpdate(true, true, false)
+        if state.notifyUpdates ~= false then checkForUpdate(true, false, false, "system") end
     end
 end
 
@@ -4888,7 +5034,11 @@ local function drawSettingsModal()
 
     addOpt("set_old", "Old-client mode: " .. legacyCompatLabel(), shouldAcceptOldClients(), openCompatDropdown, shouldAcceptOldClients() and "warn" or nil)
 
-    addOpt("set_branch", "Update branch: " .. updateBranchLabel(), false, openUpdateBranchDropdown, "accent")
+    addOpt("set_updatenotify", "Notify me when a new update releases: " .. onoff(state.notifyUpdates ~= false), state.notifyUpdates ~= false, function()
+        toggleBoolSetting("notifyUpdates", "Update release notifications")
+    end)
+
+    addOpt("set_update_settings", "Update settings / branch: " .. updateBranchLabel(), false, openUpdateModal, "accent")
 
     addOpt("set_oldtag", "Show [OLD] tags: " .. onoff(state.showOldClientTags ~= false), state.showOldClientTags ~= false, function()
         toggleBoolSetting("showOldClientTags", "Show [OLD] tags")
@@ -5033,7 +5183,7 @@ local function drawMainMenuModal()
             state.modal = nil
             systemMessage("History sync requested from " .. tostring(count) .. " online peer(s).")
         end, colors.lightGray, colors.black },
-        { "Auto Update", openUpdateModal, colors.lightGray, colors.black },
+        { "Update Settings", openUpdateModal, colors.lightGray, colors.black },
         { "Profile", function() state.modal = "profile" state.modalMode = "profile" state.modalInput = state.profile.display or state.username or "" end, colors.lightGray, colors.black },
         { "Settings", openSettingsModal, colors.lightGray, colors.black },
         { "Security Center", openSecurityModal, T().warn, colors.black },
@@ -5057,6 +5207,7 @@ local function drawMainMenuModal()
     end)
     addButton("menu_settings", mx + 1 + bw + gap, fy, bw, "Settings", colors.black, colors.lightGray, openSettingsModal)
     addButton("menu_help", mx + 1 + (bw + gap) * 2, fy, bw, "Help", colors.black, colors.lightGray, function()
+        state.helpPage = 1
         state.modal = "help"
     end)
     addButton("menu_close", mx + 1 + (bw + gap) * 3, fy, mw - 2 - (bw + gap) * 3, "Close", colors.white, colors.gray, closeModal)
@@ -5107,49 +5258,62 @@ local function drawChatsModal()
 end
 
 local function drawHelpModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 62, isPocket() and 15 or 19)
+    local mx, my, mw, mh = modalBox(isPocket() and w or 64, isPocket() and 16 or 19, "help")
 
-    modalHeader(mx, my, mw, "Slash commands", "/help command for details")
+    local totalPages = #COMMAND_HELP + 1
+    state.helpPage = tonumber(state.helpPage) or 1
+    if state.helpPage < 1 then state.helpPage = 1 end
+    if state.helpPage > totalPages then state.helpPage = totalPages end
 
-    local lines = {
-        "Type commands exactly like Discord: /pm @user, /join #group",
-        "ENTER send   TAB next chat   ESC close"
-    }
+    modalHeader(mx, my, mw, "Slash commands", "Page " .. tostring(state.helpPage) .. "/" .. tostring(totalPages) .. " | /help command")
 
-    for _, cat in ipairs(COMMAND_HELP) do
-        table.insert(lines, "")
-        table.insert(lines, cat.title)
+    fill(mx + 1, my + 3, mw - 2, mh - 5, colors.lightGray)
+
+    local lines = {}
+    if state.helpPage == 1 then
+        lines = {
+            "Commands behave like Discord slash commands.",
+            "Examples:",
+            "  /pm @user",
+            "  /friend @user",
+            "  /join #group",
+            "  /ping @everyone",
+            "",
+            "System output goes to local #system.",
+            "Use /help command for details, e.g. /help update.",
+            "People marks: * friend, ! request, ? sent.",
+            "Chat marks: ^ pinned, [OLD] legacy peer."
+        }
+    else
+        local cat = COMMAND_HELP[state.helpPage - 1]
+        table.insert(lines, tostring(cat.title or "Commands"))
+        table.insert(lines, string.rep("-", math.min(24, mw - 2)))
         for _, item in ipairs(cat.items or {}) do
             local args = item.args and (" " .. item.args) or ""
-            table.insert(lines, "  " .. item.cmd .. args .. "  -  " .. item.desc)
+            table.insert(lines, item.cmd .. args)
+            table.insert(lines, "  " .. tostring(item.desc or ""))
         end
     end
 
-    table.insert(lines, "")
-    table.insert(lines, "People marks: * friend, ! request, ? sent. Chat mark: ^ pinned.")
-
-    local maxRows = mh - 4
-    local y = my + 2
+    local maxRows = mh - 5
+    local y = my + 3
     for i = 1, math.min(#lines, maxRows) do
         local line = lines[i]
         local col = colors.black
-        if line == "" then
-            -- spacing row
-        elseif line:find("^  /") then
-            col = colors.black
-        elseif not line:find("^%s") and not line:find("^/") then
-            col = T().top
-        end
+        if i == 1 and state.helpPage > 1 then col = T().top end
+        if line:find("^%s%s/") or line:find("^/") then col = colors.black end
         text(mx + 1, y, trim(line, mw - 2), col, colors.lightGray)
         y = y + 1
     end
 
-    local total = #lines
-    if total > maxRows then
-        text(mx + 1, my + mh - 2, trim("Showing " .. tostring(maxRows) .. "/" .. tostring(total) .. ". Use /help <command> for more.", mw - 10), colors.gray, colors.lightGray)
-    end
-
-    addButton("help_close", mx + mw - 8, my + mh - 1, 8, "Close", colors.white, colors.gray, function()
+    local fy = my + mh - 1
+    addButton("help_prev", mx + 1, fy, 8, "Prev", colors.black, colors.lightGray, function()
+        state.helpPage = math.max(1, (state.helpPage or 1) - 1)
+    end)
+    addButton("help_next", mx + 10, fy, 8, "Next", colors.black, T().accent, function()
+        state.helpPage = math.min(totalPages, (state.helpPage or 1) + 1)
+    end)
+    addButton("help_close", mx + mw - 8, fy, 8, "Close", colors.white, colors.gray, function()
         state.modal = nil
     end)
 end
@@ -5189,8 +5353,8 @@ function drawUpdateBranchModal()
                     openCustomUpdateBranchModal()
                 else
                     setUpdateBranch(item.key)
-                    state.modal = "settings"
-                    systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+                    state.modal = "update"
+                    systemMessage("Update branch set to " .. updateBranchLabel() .. ".", "system")
                 end
             end)
         end
@@ -5211,7 +5375,7 @@ function drawUpdateBranchModal()
         refreshUpdateBranches(false)
     end)
     addButton("branch_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, function()
-        state.modal = "settings"
+        state.modal = "update"
     end)
 end
 
@@ -5226,37 +5390,59 @@ function drawCustomUpdateBranchModal()
 
     addButton("branch_custom_save", mx + 1, my + mh - 1, 8, "Save", colors.black, T().good, function()
         setUpdateBranch("custom", state.modalInput)
-        state.modal = "settings"
+        state.modal = "update"
         state.modalInput = ""
-        systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+        systemMessage("Update branch set to " .. updateBranchLabel() .. ".", "system")
     end)
 
     addButton("branch_custom_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openUpdateBranchDropdown)
 end
 
 local function drawUpdateModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 10 or 11)
+    local mx, my, mw, mh = modalBox(isPocket() and w or 60, isPocket() and 16 or 18, "update")
 
-    modalHeader(mx, my, mw, "Auto Update", nil)
-    text(mx + 1, my + 3, trim("Source: GitHub benchware/Xenit-Chat", mw - 2), colors.black, colors.lightGray)
-    text(mx + 1, my + 4, trim("Branch: " .. updateBranchLabel(), mw - 2), colors.black, colors.lightGray)
-    text(mx + 1, my + 5, trim("Local version: v" .. appVersion() .. " | " .. protocolName(), mw - 2), colors.gray, colors.lightGray)
-    text(mx + 1, my + 6, trim("Manual: /update, /update install, /branch", mw - 2), colors.gray, colors.lightGray)
+    modalHeader(mx, my, mw, "Update settings", "Branch + check/install + shared metadata")
+    text(mx + 1, my + 3, trim("Repo: " .. tostring(APP.updateOwner or "benchware") .. "/" .. tostring(APP.updateRepo or "Xenit-Chat"), mw - 2), colors.black, colors.lightGray)
+    text(mx + 1, my + 4, trim("Branch: " .. updateBranchLabel() .. " | Source: " .. (state.updateBranchesStatus == "github" and "GitHub API" or "fallback"), mw - 2), colors.black, colors.lightGray)
+    text(mx + 1, my + 5, trim("Local: v" .. appVersion() .. " | Notify: " .. onoff(state.notifyUpdates ~= false), mw - 2), colors.gray, colors.lightGray)
 
-    local fy = my + mh - 1
+    local metaLines = updateMetaSummaryLines()
+    local y = my + 7
+    text(mx + 1, my + 6, trim("Known remote metadata:", mw - 2), T().top, colors.lightGray)
+    if #metaLines == 0 then
+        text(mx + 2, y, trim("No update metadata yet. Press Check or Refresh.", mw - 4), colors.gray, colors.lightGray)
+        y = y + 1
+    else
+        for i = 1, math.min(#metaLines, math.max(1, mh - 12)) do
+            text(mx + 2, y, trim(metaLines[i], mw - 4), colors.gray, colors.lightGray)
+            y = y + 1
+        end
+    end
+
+    local fy = my + mh - 2
     addButton("upd_check", mx + 1, fy, 9, "Check", colors.black, T().accent, function()
         state.modal = nil
-        checkForUpdate(false, false, false, nil)
+        checkForUpdate(false, false, false, "system")
     end)
 
     addButton("upd_install", mx + 11, fy, 10, "Install", colors.black, T().good, function()
         state.modal = nil
-        checkForUpdate(false, true, false, nil)
+        checkForUpdate(false, true, false, "system")
     end)
 
     addButton("upd_branch", mx + 22, fy, 10, "Branch", colors.black, colors.lightGray, openUpdateBranchDropdown)
 
-    addButton("upd_close", mx + mw - 8, fy, 8, "Back", colors.white, colors.gray, openMainMenu)
+    addButton("upd_refresh", mx + 33, fy, 10, "Refresh", colors.black, colors.lightGray, function()
+        refreshUpdateBranches(false, "system")
+    end)
+
+    addButton("upd_notify", mx + 1, my + mh - 1, 10, state.notifyUpdates ~= false and "Notify ON" or "Notify OFF", colors.black, state.notifyUpdates ~= false and T().good or colors.lightGray, function()
+        state.notifyUpdates = not state.notifyUpdates
+        savePrefs()
+        systemMessage("Update release notifications: " .. onoff(state.notifyUpdates ~= false) .. ".", "system")
+    end)
+
+    addButton("upd_close", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
 
 local function drawThemeModal()
@@ -5426,9 +5612,9 @@ local function drawModal()
         drawAppControlsModal()
     elseif state.modal == "update_branch_custom" then
         setUpdateBranch("custom", state.modalInput)
-        state.modal = "settings"
+        state.modal = "update"
         state.modalInput = ""
-        systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+        systemMessage("Update branch set to " .. updateBranchLabel() .. ".", "system")
 
     elseif state.modal == "error" then
         drawErrorModal()
@@ -5819,6 +6005,10 @@ local function handleNetworkMessage(senderId, msg)
         safeSendTo(senderId, "hello_ack", {
             current = state.current
         })
+        local selectedMeta = state.updateMetaCache and state.updateMetaCache[selectedUpdateBranch()]
+        if selectedMeta then
+            safeSendTo(senderId, "update_meta", { branch = selectedMeta.branch, remoteVersion = selectedMeta.version, source = "peer-cache" })
+        end
         if state.autoHistorySync ~= false then requestHistorySync(senderId, msg.publicId) end
 
     elseif msg.kind == "hello_ack" then
@@ -5838,6 +6028,11 @@ local function handleNetworkMessage(senderId, msg)
 
     elseif msg.kind == "pong" then
         receivePong(msg)
+
+    elseif msg.kind == "update_meta" then
+        if msg.branch and msg.remoteVersion then
+            rememberUpdateMeta(msg.branch, msg.remoteVersion, displayName(msg.user, msg.publicId, msg.profile), msg.publicId)
+        end
 
     elseif msg.kind == "history_request" then
         if shouldShareHistoryWith(msg.publicId) then
@@ -6184,6 +6379,20 @@ local function handleKey(key)
         return
     end
 
+    if state.modal == "help" then
+        local totalPages = #COMMAND_HELP + 1
+        if key == keys.left or key == keys.up or key == keys.pageUp then
+            state.helpPage = math.max(1, (state.helpPage or 1) - 1)
+        elseif key == keys.right or key == keys.down or key == keys.pageDown then
+            state.helpPage = math.min(totalPages, (state.helpPage or 1) + 1)
+        elseif key == keys.home then
+            state.helpPage = 1
+        elseif key == keys['end'] then
+            state.helpPage = totalPages
+        end
+        return
+    end
+
     if state.modal == "settings" then
         if key == keys.up then
             state.settingsScroll = math.max(0, (state.settingsScroll or 0) - 1)
@@ -6348,7 +6557,14 @@ local function uiLoop()
             redraw = true
 
         elseif event == "mouse_scroll" then
-            if state.modal == "settings" then
+            if state.modal == "help" then
+                local totalPages = #COMMAND_HELP + 1
+                if p1 < 0 then
+                    state.helpPage = math.max(1, (state.helpPage or 1) - 1)
+                else
+                    state.helpPage = math.min(totalPages, (state.helpPage or 1) + 1)
+                end
+            elseif state.modal == "settings" then
                 if p1 < 0 then
                     state.settingsScroll = math.max(0, (state.settingsScroll or 0) - 3)
                 else

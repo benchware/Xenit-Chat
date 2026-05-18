@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "21.0.2",
+    version = "21.0.3",
     protocolVersion = 20,
     protocolName = "Oxygen",
     protocol = "xenitchat_bus",
@@ -308,6 +308,9 @@ local state = {
     allowAttachments = true,
     autoPlayAudio = false,
     autoHistorySync = true,
+    historySyncMode = "manual_no_relays",
+    historyRequestTickets = {},
+    relayStartupSynced = {},
     p2pRelayMode = false,
     authSync = true,
     authLookupPending = {},
@@ -963,15 +966,146 @@ function broadcastAuthOffer(username)
     broadcast("auth_offer", { authRecord = rec })
 end
 
-function requestRelaySync(senderId, publicId)
+SYNC_MODE_ORDER = {
+    "manual_no_relays",
+    "startup_relays_once",
+    "manual_devices",
+    "manual_relays",
+    "always_devices",
+    "always_relays",
+    "danger_outdated_relays_once",
+    "danger_outdated_relays_always"
+}
+
+SYNC_MODE_LABELS = {
+    manual_no_relays = "Manual sync, block relays",
+    startup_relays_once = "Relays once after login",
+    manual_devices = "Manual: my devices only",
+    manual_relays = "Manual: relays only",
+    always_devices = "Always: my devices",
+    always_relays = "Always: relays",
+    danger_outdated_relays_once = "DANGER: outdated relays once",
+    danger_outdated_relays_always = "DANGER: always outdated relays"
+}
+
+function isValidHistorySyncMode(mode)
+    return SYNC_MODE_LABELS[tostring(mode or "")] ~= nil
+end
+
+function historySyncModeLabel(mode)
+    return SYNC_MODE_LABELS[tostring(mode or state.historySyncMode or "manual_no_relays")] or SYNC_MODE_LABELS.manual_no_relays
+end
+
+function peerInfoFor(publicId, msg)
+    local u = (publicId and state.users and state.users[publicId]) or {}
+    msg = msg or {}
+    local info = {}
+    info.publicId = publicId or msg.publicId
+    info.username = msg.user or u.username
+    info.senderId = u.senderId
+    info.remoteVersion = tonumber(msg.version or u.remoteVersion or 0) or 0
+    info.protocolName = msg.protocolName or u.remoteProtocolName
+    info.isRelay = msg.isRelay == true or msg.relayMode ~= nil or u.isRelay == true or u.relayMode ~= nil
+    info.isMyDevice = (info.username and state.username and info.username == state.username) or (info.publicId and state.publicId and info.publicId == state.publicId)
+    info.isOutdatedRelay = info.isRelay and info.remoteVersion > 0 and info.remoteVersion < protocolVersion()
+    return info
+end
+
+function historyModeAllowsSource(info, manual)
+    local mode = state.historySyncMode or "manual_no_relays"
+    info = info or {}
+
+    -- Outdated relays are blocked unless an explicit DANGER mode is selected.
+    if info.isOutdatedRelay and mode ~= "danger_outdated_relays_once" and mode ~= "danger_outdated_relays_always" then
+        return false
+    end
+
+    if mode == "manual_no_relays" then
+        return manual and not info.isRelay
+    elseif mode == "startup_relays_once" then
+        return info.isRelay
+    elseif mode == "manual_devices" then
+        return manual and info.isMyDevice
+    elseif mode == "manual_relays" then
+        return manual and info.isRelay and not info.isOutdatedRelay
+    elseif mode == "always_devices" then
+        return info.isMyDevice
+    elseif mode == "always_relays" then
+        return info.isRelay and not info.isOutdatedRelay
+    elseif mode == "danger_outdated_relays_once" then
+        return manual and info.isRelay
+    elseif mode == "danger_outdated_relays_always" then
+        return info.isRelay
+    end
+
+    return manual and not info.isRelay
+end
+
+function shouldAutoHistorySyncFrom(publicId, msg)
+    if state.autoHistorySync == false then return false end
+    local info = peerInfoFor(publicId, msg)
+    if state.historySyncMode == "startup_relays_once" or state.historySyncMode == "danger_outdated_relays_once" then
+        if not info.isRelay then return false end
+        state.relayStartupSynced = state.relayStartupSynced or {}
+        if state.relayStartupSynced[publicId] then return false end
+        if not historyModeAllowsSource(info, false) then return false end
+        state.relayStartupSynced[publicId] = true
+        return true
+    end
+    return historyModeAllowsSource(info, false)
+end
+
+function shouldManualHistorySyncFrom(publicId, u)
+    return historyModeAllowsSource(peerInfoFor(publicId, u), true)
+end
+
+function noteHistoryRequest(publicId)
+    if not publicId then return end
+    state.historyRequestTickets = state.historyRequestTickets or {}
+    state.historyRequestTickets[publicId] = os.clock()
+end
+
+function hasRecentHistoryRequest(publicId)
+    if not publicId then return false end
+    local t = state.historyRequestTickets and state.historyRequestTickets[publicId]
+    if not t then return false end
+    if os.clock() - t > 60 then
+        state.historyRequestTickets[publicId] = nil
+        return false
+    end
+    return true
+end
+
+function cycleHistorySyncMode()
+    local cur = state.historySyncMode or "manual_no_relays"
+    local nextMode = SYNC_MODE_ORDER[1]
+    for i, mode in ipairs(SYNC_MODE_ORDER) do
+        if mode == cur then
+            nextMode = SYNC_MODE_ORDER[(i % #SYNC_MODE_ORDER) + 1]
+            break
+        end
+    end
+    state.historySyncMode = nextMode
+    state.relayStartupSynced = {}
+    savePrefs()
+    systemMessage("History sync mode: " .. historySyncModeLabel(), "system")
+end
+
+function openHistorySyncModeDropdown()
+    state.modal = "history_sync_mode"
+    state.compatScroll = 0
+end
+
+function requestRelaySync(senderId, publicId, wantHistory)
     if state.authSync == false or not senderId or not publicId then return end
     state.relayLastSync = state.relayLastSync or {}
     local now = os.clock()
     if state.relayLastSync[publicId] and now - state.relayLastSync[publicId] < APP.relaySyncCooldown then return end
     state.relayLastSync[publicId] = now
+    if wantHistory == true then noteHistoryRequest(publicId) end
     safeSendTo(senderId, "relay_sync_request", {
         wantAuth = true,
-        wantHistory = true, clearEpoch = state.clearEpoch or {},
+        wantHistory = wantHistory == true, clearEpoch = state.clearEpoch or {},
         knownAuthRevision = (loadAuthStore().revision or 0)
     })
 end
@@ -1136,6 +1270,7 @@ function defaultPrefs()
         legacyAttachmentNotice = true,
         attachmentLog = {},
         autoHistorySync = true,
+        historySyncMode = "manual_no_relays",
         clearEpoch = {},
         p2pRelayMode = false,
         authSync = true,
@@ -1218,6 +1353,7 @@ function savePrefs()
         legacyAttachmentNotice = state.legacyAttachmentNotice,
         attachmentLog = state.attachmentLog,
         autoHistorySync = state.autoHistorySync,
+        historySyncMode = state.historySyncMode,
         clearEpoch = state.clearEpoch,
         p2pRelayMode = state.p2pRelayMode,
         authSync = state.authSync,
@@ -1279,6 +1415,8 @@ function loadPrefs()
     if type(data.legacyAttachmentNotice) ~= "boolean" then data.legacyAttachmentNotice = true end
     if type(data.attachmentLog) ~= "table" then data.attachmentLog = {} end
     if type(data.autoHistorySync) ~= "boolean" then data.autoHistorySync = true end
+    if type(data.historySyncMode) ~= "string" then data.historySyncMode = "manual_no_relays" end
+    if not isValidHistorySyncMode or not isValidHistorySyncMode(data.historySyncMode) then data.historySyncMode = "manual_no_relays" end
     if type(data.clearEpoch) ~= "table" then data.clearEpoch = {} end
     if type(data.p2pRelayMode) ~= "boolean" then data.p2pRelayMode = false end
     if type(data.authSync) ~= "boolean" then data.authSync = true end
@@ -1335,7 +1473,10 @@ function loadPrefs()
     state.legacyAttachmentNotice = data.legacyAttachmentNotice
     state.attachmentLog = data.attachmentLog
     state.autoHistorySync = data.autoHistorySync
+    state.historySyncMode = data.historySyncMode
     state.clearEpoch = data.clearEpoch
+    if type(state.historyRequestTickets) ~= "table" then state.historyRequestTickets = {} end
+    if type(state.relayStartupSynced) ~= "table" then state.relayStartupSynced = {} end
     state.p2pRelayMode = data.p2pRelayMode
     state.authSync = data.authSync
     if type(state.authLookupPending) ~= "table" then state.authLookupPending = {} end
@@ -1497,6 +1638,8 @@ function markChatCleared(key)
     if not key or key == "" then return end
     state.clearEpoch = state.clearEpoch or {}
     state.clearEpoch[key] = os.time()
+    state.historyRequestTickets = {}
+    state.relayLastSync = {}
 end
 
 function rebuildMessageSeen()
@@ -1845,6 +1988,7 @@ function requestHistorySync(senderId, publicId)
     end
 
     state.historySyncLast[publicId] = now
+    noteHistoryRequest(publicId)
 
     safeSendTo(senderId, "history_request", {
         keys = historyKeysForPeer(publicId),
@@ -2343,6 +2487,8 @@ function makePacket(kind, data, legacyVersion, plainLegacy)
     data.publicId = state.publicId
     data.nodeId = os.getComputerID()
     data.profile = state.profile
+    data.isRelay = state.p2pRelayMode == true
+    data.relayMode = state.p2pRelayMode == true and "oxygen" or nil
     data.time = os.time()
     data.packetId = data.packetId or randomToken(12)
 
@@ -3909,7 +4055,8 @@ COMMAND_HELP = {
         title = "System",
         items = {
             { cmd = "/clearsystem", desc = "Clear local #system messages.", aliases = {"/clear-system", "/systemclear"} },
-            { cmd = "/sync", desc = "Request chat history sync.", aliases = {"/history"} },
+            { cmd = "/sync", desc = "Request chat history sync using selected source mode.", aliases = {"/history"} },
+            { cmd = "/syncmode", desc = "Choose history source: relays/devices/manual/danger.", aliases = {"/historymode"} },
             { cmd = "/update", args = "[check|install|force]", desc = "Check or install GitHub updates." },
             { cmd = "/branch", args = "[name|refresh]", desc = "Pick or refresh update branches." },
             { cmd = "/version", desc = "Show app/protocol version.", aliases = {"/about"} },
@@ -4013,7 +4160,8 @@ function isSystemSlashCommand(command)
         cleanattachments = true, cleanupattachments = true, clearattachments = true,
         clearsystem = true, ["clear-system"] = true, systemclear = true,
         security = true, safe = true, privacy = true, compat = true, legacy = true, oldclients = true,
-        attachments = true, files = true, relay = true, authsync = true, auth = true
+        attachments = true, files = true, relay = true, authsync = true, auth = true,
+        syncmode = true, historymode = true
     }
     return systemCommands[command] == true
 end
@@ -4158,12 +4306,26 @@ function handleSlashCommand(body)
     elseif command == "sync" or command == "history" then
         local count = 0
         for publicId, u in pairs(state.users or {}) do
-            if u.senderId then
+            if u.senderId and shouldManualHistorySyncFrom(publicId, u) then
                 requestHistorySync(u.senderId, publicId)
                 count = count + 1
             end
         end
-        systemMessage("History sync requested from " .. tostring(count) .. " online peer(s).")
+        systemMessage("History sync requested from " .. tostring(count) .. " peer(s). Mode: " .. historySyncModeLabel() .. ".")
+    elseif command == "syncmode" or command == "historymode" then
+        if rest ~= "" then
+            local wanted = rest:gsub("%s+", "_"):lower()
+            if isValidHistorySyncMode(wanted) then
+                state.historySyncMode = wanted
+                state.relayStartupSynced = {}
+                savePrefs()
+                systemMessage("History sync mode: " .. historySyncModeLabel(), "system")
+            else
+                openHistorySyncModeDropdown()
+            end
+        else
+            openHistorySyncModeDropdown()
+        end
     elseif command == "join" then
         if rest ~= "" then joinGroup(rest:gsub("^#", "")) else systemMessage("Usage: /join #group") end
     elseif command == "new" or command == "group" then
@@ -5338,6 +5500,43 @@ end
 
 
 
+function drawHistorySyncModeModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 58, isPocket() and 14 or 16, "history_sync_mode")
+    modalHeader(mx, my, mw, "History Sync Mode", "Choose where old history may come from")
+    text(mx + 1, my + 3, trim("Current: " .. historySyncModeLabel(), mw - 2), colors.black, colors.lightGray)
+
+    local rowsTop = my + 5
+    local rowsBottom = my + mh - 2
+    local visible = math.max(1, rowsBottom - rowsTop + 1)
+    state.compatScroll = tonumber(state.compatScroll) or 0
+    local maxScroll = math.max(0, #SYNC_MODE_ORDER - visible)
+    if state.compatScroll < 0 then state.compatScroll = 0 end
+    if state.compatScroll > maxScroll then state.compatScroll = maxScroll end
+
+    for row = 1, visible do
+        local idx = state.compatScroll + row
+        local mode = SYNC_MODE_ORDER[idx]
+        if mode then
+            local selected = mode == state.historySyncMode
+            local label = (selected and "[x] " or "[ ] ") .. historySyncModeLabel(mode)
+            local bgc = selected and T().accent or colors.white
+            local fgc = selected and colors.black or colors.black
+            if mode:find("danger", 1, true) then label = "DANGER: " .. label end
+            addButton("histmode_" .. tostring(idx), mx + 1, rowsTop + row - 1, mw - 2, trim(label, mw - 2), fgc, bgc, function()
+                state.historySyncMode = mode
+                state.relayStartupSynced = {}
+                savePrefs()
+                state.modal = "settings"
+                systemMessage("History sync mode: " .. historySyncModeLabel(), "system")
+            end)
+        end
+    end
+
+    if maxScroll > 0 then
+        text(mx + mw - 10, my + mh - 1, tostring(state.compatScroll + 1) .. "/" .. tostring(maxScroll + 1), colors.gray, colors.lightGray)
+    end
+end
+
 function drawCompatDropdownModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 62, isPocket() and 18 or 20, "compat_dropdown")
 
@@ -5473,9 +5672,11 @@ function drawSettingsModal()
         cleanupAttachments("expired", true)
     end, "warn")
 
-    addOpt("set_historysync", sl("History sync: " .. onoff(state.autoHistorySync ~= false), "Auto history sync: " .. onoff(state.autoHistorySync ~= false)), state.autoHistorySync ~= false, function()
+    addOpt("set_historysync", sl("Auto sync: " .. onoff(state.autoHistorySync ~= false), "Automatic history sync: " .. onoff(state.autoHistorySync ~= false)), state.autoHistorySync ~= false, function()
         toggleBoolSetting("autoHistorySync", "Auto history sync")
     end)
+
+    addOpt("set_historymode", sl("Sync mode: " .. trim(historySyncModeLabel(), 18), "History source mode: " .. trim(historySyncModeLabel(), 30)), state.historySyncMode ~= "manual_no_relays", openHistorySyncModeDropdown)
 
     addOpt("set_authsync", sl("Auth sync: " .. onoff(state.authSync ~= false), "Portable .xenit_auth sync: " .. onoff(state.authSync ~= false)), state.authSync ~= false, function()
         toggleBoolSetting("authSync", "Portable auth sync")
@@ -5658,11 +5859,11 @@ function drawMainMenuModal()
         { "History Sync", function()
             local count = 0
             for publicId, u in pairs(state.users or {}) do
-                if u.senderId then requestHistorySync(u.senderId, publicId) count = count + 1 end
+                if u.senderId and shouldManualHistorySyncFrom(publicId, u) then requestHistorySync(u.senderId, publicId) count = count + 1 end
             end
             state.modal = nil
-            systemMessage("History sync requested from " .. tostring(count) .. " online peer(s).", "system")
-        end, colors.lightGray, colors.black, "Ask peers for recent history" },
+            systemMessage("History sync requested from " .. tostring(count) .. " peer(s). Mode: " .. historySyncModeLabel() .. ".", "system")
+        end, colors.lightGray, colors.black, "Manual sync using selected policy" },
         { "Profile", function() state.modal = "profile" state.modalMode = "profile" state.modalInput = state.profile.display or state.username or "" end, colors.lightGray, colors.black, "Display name/status" },
         { "Theme", function() state.modal = "theme" end, colors.lightGray, colors.black, "Change look" },
         { "Security Center", openSecurityModal, T().warn, colors.black, "Privacy, trust, safety" },
@@ -6143,7 +6344,9 @@ function drawModal()
         drawHelpModal()
     elseif state.modal == "settings" then
         drawSettingsModal()
-    elseif state.modal == "compat_dropdown" then
+    elseif state.modal == "history_sync_mode" then
+        drawHistorySyncModeModal()
+    elseif (state.modal == "compat_dropdown" or state.modal == "history_sync_mode") then
         drawCompatDropdownModal()
     elseif state.modal == "update_branch" then
         drawUpdateBranchModal()
@@ -6531,6 +6734,8 @@ function updateRemoteUser(senderId, msg)
         remoteProtocolName = msg.protocolName,
         legacyMirror = msg.compatMirror == true,
         oldClient = remoteOldClient,
+        isRelay = msg.isRelay == true or msg.relayMode ~= nil,
+        relayMode = msg.relayMode,
         lastSeenClock = os.clock()
     }
 end
@@ -6547,21 +6752,21 @@ function handleNetHello(senderId, msg)
         })
     end
 
-    if state.autoHistorySync ~= false then
+    if shouldAutoHistorySyncFrom(msg.publicId, msg) then
         requestHistorySync(senderId, msg.publicId)
     end
     if state.authSync ~= false then
-        requestRelaySync(senderId, msg.publicId)
+        requestRelaySync(senderId, msg.publicId, false)
         broadcastAuthOffer(state.username)
     end
 end
 
 function handleNetHelloAck(senderId, msg)
-    if state.autoHistorySync ~= false then
+    if shouldAutoHistorySyncFrom(msg.publicId, msg) then
         requestHistorySync(senderId, msg.publicId)
     end
     if state.authSync ~= false then
-        requestRelaySync(senderId, msg.publicId)
+        requestRelaySync(senderId, msg.publicId, false)
     end
 end
 
@@ -6600,6 +6805,7 @@ function handleNetHistoryRequest(senderId, msg)
 end
 
 function handleNetHistoryReply(senderId, msg)
+    if not hasRecentHistoryRequest(msg.publicId) then return end
     local imported = importHistoryBundles(msg.bundles, msg.publicId)
     if imported > 0 then
         addMessage("global", "system", "Synced " .. tostring(imported) .. " older message(s) from " .. displayName(msg.user, msg.publicId, msg.profile) .. ".", "system", { silent = true })
@@ -6795,7 +7001,7 @@ function handleNetRelaySyncReply(senderId, msg)
             addMessage("system", "system", "Synced " .. tostring(count) .. " auth record(s) from relay/peer.", "system", { silent = true })
         end
     end
-    if type(msg.bundles) == "table" then
+    if type(msg.bundles) == "table" and hasRecentHistoryRequest(msg.publicId) then
         local imported = importHistoryBundles(msg.bundles, msg.publicId)
         if imported > 0 then
             addMessage("system", "system", "Relay synced " .. tostring(imported) .. " older message(s).", "system", { silent = true })
@@ -6859,7 +7065,7 @@ function handleNetworkMessage(senderId, msg)
     end
     if tonumber(msg.version) == nil then return end
     if not msg.user or not msg.publicId then return end
-    if msg.publicId == state.publicId then return end
+    if msg.publicId == state.publicId and tonumber(msg.nodeId or -1) == tonumber(os.getComputerID()) then return end
     if msg.compatMirror and tonumber(msg.sourceProtocolVersion or 0) >= protocolVersion() then return end
     if rememberPacket(msg) then return end
     if not shouldProcessVersionMismatch(msg) then return end
@@ -7106,7 +7312,7 @@ function handleKey(key)
         return
     end
 
-    if state.modal == "compat_dropdown" then
+    if (state.modal == "compat_dropdown" or state.modal == "history_sync_mode") then
         if key == keys.up then
             state.compatScroll = math.max(0, (state.compatScroll or 0) - 1)
         elseif key == keys.down then
@@ -7296,7 +7502,7 @@ function uiLoop()
                 else
                     state.settingsScroll = (state.settingsScroll or 0) + 3
                 end
-            elseif state.modal == "compat_dropdown" then
+            elseif (state.modal == "compat_dropdown" or state.modal == "history_sync_mode") then
                 if p1 < 0 then
                     state.compatScroll = math.max(0, (state.compatScroll or 0) - 3)
                 else

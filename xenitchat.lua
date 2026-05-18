@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "21.0.4",
+    version = "21.0.5",
     protocolVersion = 20,
     protocolName = "Oxygen",
     protocol = "xenitchat_bus",
@@ -339,6 +339,9 @@ local state = {
         display = "",
         status = "Available"
     },
+    profiles = {},
+    profileOwner = nil,
+    activeAccount = nil,
 
     theme = "midnight",
     buttons = {},
@@ -1233,6 +1236,8 @@ function defaultPrefs()
             display = "",
             status = "Available"
         },
+        profiles = {},
+        profileOwner = nil,
         friends = {},
         friendRequests = {
             inbox = {},
@@ -1301,6 +1306,15 @@ function savePrefs()
     local existingPrefs = readSerialized(APP.prefsFile, {})
     local rememberedUsername = nil
 
+    state.profiles = state.profiles or {}
+    if state.username and state.username ~= "" then
+        state.profiles[state.username] = {
+            display = state.profile and state.profile.display or state.username,
+            status = state.profile and state.profile.status or "Available"
+        }
+        state.profileOwner = state.username
+    end
+
     if state.remember then
         rememberedUsername = state.username
 
@@ -1319,6 +1333,8 @@ function savePrefs()
         rememberedUsername = rememberedUsername,
         theme = state.theme,
         profile = state.profile,
+        profiles = state.profiles,
+        profileOwner = state.profileOwner or state.username,
         friends = state.friends,
         friendRequests = state.friendRequests,
         blocked = state.blocked,
@@ -1431,6 +1447,11 @@ function loadPrefs()
     if type(data.rememberedUsername) ~= "string" then data.rememberedUsername = data.username end
     if type(data.username) ~= "string" then data.username = data.rememberedUsername end
     if type(data.profile) ~= "table" then data.profile = { display = "", status = "Available" } end
+    if type(data.profiles) ~= "table" then data.profiles = {} end
+    if type(data.profileOwner) ~= "string" then data.profileOwner = data.username or data.rememberedUsername end
+    if data.profileOwner and data.profileOwner ~= "" and not data.profiles[data.profileOwner] then
+        data.profiles[data.profileOwner] = data.profile
+    end
 
     state.remember = data.remember ~= false
     state.rememberedUsername = data.username or data.rememberedUsername
@@ -1753,6 +1774,25 @@ end
 
 function systemMessage(body, key)
     addMessage(commandOutputKey(key), "system", body, "system")
+end
+
+function openSystemChannelForOutput()
+    ensureSystemChannel()
+    switchConvo("system")
+end
+
+function runInSystemOutput(fn)
+    openSystemChannelForOutput()
+    local oldActive = state._slashCommandActive
+    local oldSystem = state._slashOutputToSystem
+    state._slashCommandActive = true
+    state._slashOutputToSystem = true
+    local ok, err = pcall(fn)
+    state._slashCommandActive = oldActive
+    state._slashOutputToSystem = oldSystem
+    if not ok then
+        addMessage("system", "system", "Action failed: " .. tostring(err), "warn")
+    end
 end
 
 function isHistorySyncable(key, publicId)
@@ -3236,6 +3276,15 @@ function showMyId()
     systemMessage("Your ID: " .. shortId(state.publicId) .. "  | Protocol " .. protocolName() .. "/" .. tostring(protocolVersion()), "system")
 end
 
+function showSessionInfo()
+    systemMessage("Account: " .. tostring(state.username or "not logged in"), "system")
+    systemMessage("Display: " .. tostring((state.profile and state.profile.display) or ""), "system")
+    systemMessage("Status: " .. tostring((state.profile and state.profile.status) or "Available"), "system")
+    systemMessage("ID: " .. shortId(state.publicId or ""), "system")
+    systemMessage("Relay: " .. onoff(state.p2pRelayMode == true) .. " | Auth sync: " .. onoff(state.authSync ~= false), "system")
+    systemMessage("History mode: " .. historySyncModeLabel(), "system")
+end
+
 function toggleQuietVersionWarnings()
     state.quietVersionWarnings = not state.quietVersionWarnings
     savePrefs()
@@ -4156,6 +4205,7 @@ function isSystemSlashCommand(command)
         help = true, ["?"] = true, commands = true, slash = true, shortcuts = true,
         update = true, branch = true, branches = true, settings = true, prefs = true,
         peers = true, net = true, network = true, who = true, online = true,
+        whoami = true, session = true, me = true,
         version = true, about = true, audit = true, backup = true,
         cleanattachments = true, cleanupattachments = true, clearattachments = true,
         clearsystem = true, ["clear-system"] = true, systemclear = true,
@@ -4241,6 +4291,8 @@ function handleSlashCommand(body)
         showPeerStatus()
     elseif command == "id" or command == "myid" then
         showMyId()
+    elseif command == "whoami" or command == "session" or command == "me" then
+        showSessionInfo()
     elseif command == "read" or command == "readall" then
         markAllRead()
     elseif command == "pin" or command == "unpin" then
@@ -4397,11 +4449,13 @@ function handleSlashCommand(body)
         showSafetyFor(rest)
     elseif command == "status" then
         state.profile.status = rest ~= "" and trim(rest, 40) or "Available"
+        saveCurrentProfileForAccount()
         savePrefs()
         broadcast("hello", {})
         systemMessage("Status updated.")
     elseif command == "name" then
         state.profile.display = rest ~= "" and trim(rest, 24) or state.username
+        saveCurrentProfileForAccount()
         savePrefs()
         broadcast("hello", {})
         systemMessage("Display name updated.")
@@ -4617,13 +4671,79 @@ function setError(message)
     state.modalInput = tostring(message or "Error")
 end
 
-function finishLogin(username, account, remembered)
-    state.username = username
-    state.publicId = account.publicId or portablePublicId(username, account.salt, account.passHash)
+function cloneProfile(p, fallbackName)
+    if type(p) ~= "table" then p = {} end
+    local display = tostring(p.display or "")
+    local status = tostring(p.status or "")
+    if display == "" then display = tostring(fallbackName or "") end
+    if status == "" then status = "Available" end
+    return { display = display, status = status }
+end
 
-    if not state.profile.display or state.profile.display == "" then
-        state.profile.display = username
+function saveCurrentProfileForAccount()
+    if state.username and state.username ~= "" then
+        state.profiles = state.profiles or {}
+        state.profiles[state.username] = cloneProfile(state.profile, state.username)
+        state.profileOwner = state.username
     end
+end
+
+function loadProfileForAccount(username)
+    username = tostring(username or "")
+    state.profiles = state.profiles or {}
+    local p = state.profiles[username]
+
+    -- Older builds stored only one global profile. Reuse it only when it is known
+    -- to belong to this username; otherwise fall back to the real account name so
+    -- logging into another account never shows the previous account's display name.
+    if not p and state.profileOwner == username then
+        p = state.profile
+    end
+
+    if not p then
+        p = { display = username, status = "Available" }
+    end
+
+    state.profile = cloneProfile(p, username)
+    state.profiles[username] = cloneProfile(state.profile, username)
+    state.profileOwner = username
+end
+
+function resetSessionForAccount(username, publicId)
+    if state.activeAccount == username and state.publicId == publicId then return end
+
+    -- Clear volatile identity/network state when switching accounts on the same
+    -- computer. Persistent chats/prefs/history stay, but stale peer/account state
+    -- from the previous login must not leak into the new session.
+    state.users = {}
+    state.discover = {}
+    state.packetSeen = {}
+    state.packetSeenOrder = {}
+    state.historySyncLast = {}
+    state.historyRequestTickets = {}
+    state.relayStartupSynced = {}
+    state.authLookupPending = {}
+    state.relayLastSync = {}
+    state.pingPending = {}
+    state.pingOrder = {}
+    state.pendingTransfers = {}
+    state.updateChecked = false
+    state.modal = nil
+    state.modalInput = ""
+    state.modalData = nil
+    state.current = state.current or "global"
+    if state.current == "system" then state.current = "global" end
+    state.scroll = 0
+    state.activeAccount = username
+end
+
+function finishLogin(username, account, remembered)
+    local nextPublicId = account.publicId or portablePublicId(username, account.salt, account.passHash)
+    saveCurrentProfileForAccount()
+    resetSessionForAccount(username, nextPublicId)
+    state.username = username
+    state.publicId = nextPublicId
+    loadProfileForAccount(username)
 
     state.screen = "chat"
     state.focus = "message"
@@ -4744,9 +4864,11 @@ function tryRememberLogin()
 end
 
 function logout()
+    saveCurrentProfileForAccount()
     local lastUsername = state.username or state.rememberedUsername or ""
 
     state.username = nil
+    state.activeAccount = nil
     state.publicId = nil
     state.screen = "login"
     state.focus = state.remember and "password" or "username"
@@ -4768,6 +4890,8 @@ function openAppControls()
     state.modal = "app_controls"
     state.modalInput = ""
     state.modalData = nil
+    state.draggingModal = nil
+    state.menuScroll = tonumber(state.menuScroll) or 0
 end
 
 function shutdownApp(mode)
@@ -5476,6 +5600,7 @@ function drawProfileModal()
             state.profile.display = state.modalInput ~= "" and trim(state.modalInput, 24) or state.username
         end
 
+        saveCurrentProfileForAccount()
         savePrefs()
         broadcast("hello", {})
         state.modal = nil
@@ -5849,7 +5974,7 @@ function drawMainMenuModal()
         { "People & Friends", function() state.modal = "people" end, T().warn, colors.black, "Online users, friends, block" },
         { "Friend Inbox", function() state.modal = "friend_inbox" end, T().accent, colors.black, "Accept/decline requests" },
         { "Direct Message", function() state.modal = "pm" state.modalInput = "" end, colors.lightGray, colors.black, "Open a private chat" },
-        { "P2P Peers", function() state.modal = nil ensureSystemChannel() switchConvo("system") showPeerStatus() end, T().accent, colors.black, "Network/compat status" },
+        { "P2P Peers", function() state.modal = nil runInSystemOutput(showPeerStatus) end, T().accent, colors.black, "Network/compat status" },
         { "Discover Groups", requestDiscovery, T().accent, colors.black, "Find public groups" },
         { "New Group", function() state.modal = "create" state.modalInput = "" state.modalMode = "public" end, T().good, colors.black, "Create public/private group" },
         { "Chat Settings", openGroupSettings, colors.lightGray, colors.black, "Rename/leave/current chat" },
@@ -5857,12 +5982,14 @@ function drawMainMenuModal()
         { "Mark All Read", markAllRead, colors.lightGray, colors.black, "Clear unread badges" },
         { "Clear #system", function() state.modal = nil ensureSystemChannel() switchConvo("system") clearSystemChannel(true) end, colors.lightGray, colors.black, "Clear local system output" },
         { "History Sync", function()
-            local count = 0
-            for publicId, u in pairs(state.users or {}) do
-                if u.senderId and shouldManualHistorySyncFrom(publicId, u) then requestHistorySync(u.senderId, publicId) count = count + 1 end
-            end
             state.modal = nil
-            systemMessage("History sync requested from " .. tostring(count) .. " peer(s). Mode: " .. historySyncModeLabel() .. ".", "system")
+            runInSystemOutput(function()
+                local count = 0
+                for publicId, u in pairs(state.users or {}) do
+                    if u.senderId and shouldManualHistorySyncFrom(publicId, u) then requestHistorySync(u.senderId, publicId) count = count + 1 end
+                end
+                systemMessage("History sync requested from " .. tostring(count) .. " peer(s). Mode: " .. historySyncModeLabel() .. ".")
+            end)
         end, colors.lightGray, colors.black, "Manual sync using selected policy" },
         { "Profile", function() state.modal = "profile" state.modalMode = "profile" state.modalInput = state.profile.display or state.username or "" end, colors.lightGray, colors.black, "Display name/status" },
         { "Theme", function() state.modal = "theme" end, colors.lightGray, colors.black, "Change look" },
@@ -6239,15 +6366,15 @@ function drawThemeModal()
 end
 
 function drawAppControlsModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 46, isPocket() and 12 or 13)
+    local mx, my, mw, mh = modalBox(isPocket() and w or 46, isPocket() and 12 or 13, "app_controls")
 
-    modalHeader(mx, my, mw, "App controls", "Close, restart, logout, or reboot safely.")
+    modalHeader(mx, my, mw, "App controls", useSmallUI() and "Restart / close / logout" or "Close, restart, logout, or reboot safely.")
 
     local y = my + 3
     local function row(id, label, note, bgColor, fgColor, action)
         if y <= my + mh - 2 then
             addButton(id, mx + 1, y, mw - 2, label, fgColor or colors.black, bgColor or colors.white, action)
-            if note and note ~= "" and y + 1 <= my + mh - 2 then
+            if not useSmallUI() and note and note ~= "" and y + 1 <= my + mh - 2 then
                 text(mx + 2, y + 1, trim(note, mw - 4), colors.gray, colors.lightGray)
                 y = y + 2
             else
@@ -6256,11 +6383,11 @@ function drawAppControlsModal()
         end
     end
 
-    row("app_restart", "Restart XenitChat", "Reloads the script after saving prefs/history.", T().good, colors.black, function()
+    row("app_restart", useSmallUI() and "Restart" or "Restart XenitChat", "Reloads the script after saving prefs/history.", T().good, colors.black, function()
         shutdownApp("restart")
     end)
 
-    row("app_exit", "Close XenitChat", "Returns to the CraftOS shell.", T().warn, colors.black, function()
+    row("app_exit", useSmallUI() and "Close App" or "Close XenitChat", "Returns to the CraftOS shell.", T().warn, colors.black, function()
         shutdownApp("exit")
     end)
 
@@ -6270,8 +6397,15 @@ function drawAppControlsModal()
     end)
 
     if mh >= 12 then
-        row("app_reboot", "Reboot computer", "Full CraftOS reboot.", T().danger, colors.white, function()
+        row("app_reboot", useSmallUI() and "Reboot" or "Reboot computer", "Full CraftOS reboot.", T().danger, colors.white, function()
             shutdownApp("reboot")
+        end)
+    end
+
+    if y <= my + mh - 2 then
+        addButton("app_switch", mx + 1, y, mw - 10, useSmallUI() and "Switch Account" or "Switch account / login", colors.black, colors.white, function()
+            logout()
+            state.modal = nil
         end)
     end
 
@@ -6305,8 +6439,14 @@ function drawSecurityModal()
     end)
     y = y + 1
 
-    addButton("sec_audit", mx + 1, y, math.floor((mw - 3) / 2), "Run Audit", colors.black, T().accent, showSecurityAudit)
-    addButton("sec_backup", mx + 2 + math.floor((mw - 3) / 2), y, mw - 3 - math.floor((mw - 3) / 2), "Backup", colors.black, T().good, backupLocalData)
+    addButton("sec_audit", mx + 1, y, math.floor((mw - 3) / 2), "Run Audit", colors.black, T().accent, function()
+        state.modal = nil
+        runInSystemOutput(showSecurityAudit)
+    end)
+    addButton("sec_backup", mx + 2 + math.floor((mw - 3) / 2), y, mw - 3 - math.floor((mw - 3) / 2), "Backup", colors.black, T().good, function()
+        state.modal = nil
+        runInSystemOutput(backupLocalData)
+    end)
     y = y + 2
 
     text(mx + 1, y, "Recent security notes:", colors.black, colors.lightGray)
@@ -7389,9 +7529,12 @@ function handleMouseDrag(x, y)
 end
 
 function handleMouse(x, y)
-    if clickButton(x, y) then return end
+    -- Modal header close/drag takes priority over normal buttons. This avoids
+    -- stale/overlapping button hitboxes on pocket shells where clicking [X] or a
+    -- header row sometimes triggered the row underneath.
     if clickModalCloseZone(x, y) then return end
     if beginModalDrag(x, y) then return end
+    if clickButton(x, y) then return end
 
     if state.screen == "login" or state.screen == "register" then
         local boxes = state.loginHitboxes or {}

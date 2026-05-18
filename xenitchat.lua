@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "19.2.6",
+    version = "19.2.8",
     protocolVersion = 19,
     protocolName = "Obsidian",
     protocol = "xenitchat_bus",
@@ -238,6 +238,9 @@ local state = {
     useSystemSlashChannel = true,
     modalPositions = {},
     draggingModal = nil,
+    settingsScroll = 0,
+    slashOpenedSystemOutput = false,
+    lastDragDrawClock = 0,
     showOldClientTags = true,
     suppressRemoteVersionWarnings = true,
     showTimestamps = true,
@@ -1145,6 +1148,7 @@ local function commandOutputKey(key)
     if key then return key end
     if state._slashCommandActive and state.useSystemSlashChannel ~= false then
         ensureSystemChannel()
+        state.slashOpenedSystemOutput = true
         return "system"
     end
     return state.current
@@ -2761,7 +2765,9 @@ local function handleSlashCommand(body)
     local command, rest = body:match("^/(%S+)%s*(.*)$")
     command = command and command:lower() or ""
     rest = rest or ""
+    local slashOrigin = state.current
     state._slashCommandActive = true
+    state.slashOpenedSystemOutput = false
 
     if command == "help" or command == "?" or command == "commands" or command == "slash" or command == "shortcuts" then
         if rest ~= "" then
@@ -2794,11 +2800,11 @@ local function handleSlashCommand(body)
     elseif command == "update" then
         local mode = rest:lower()
         if mode == "install" or mode == "now" then
-            checkForUpdate(false, true, false, state.current)
+            checkForUpdate(false, true, false, nil)
         elseif mode == "force" then
-            checkForUpdate(false, true, true, state.current)
+            checkForUpdate(false, true, true, nil)
         else
-            checkForUpdate(false, false, false, state.current)
+            checkForUpdate(false, false, false, nil)
         end
     elseif command == "who" or command == "online" then
         listOnlineUsers()
@@ -2933,7 +2939,13 @@ local function handleSlashCommand(body)
     end
 
     state.input = ""
+    local shouldOpenSystem = state.slashOpenedSystemOutput and state.useSystemSlashChannel ~= false and state.current == slashOrigin
     state._slashCommandActive = false
+    state.slashOpenedSystemOutput = false
+    if shouldOpenSystem then
+        ensureSystemChannel()
+        switchConvo("system")
+    end
     return true
 end
 
@@ -3956,97 +3968,140 @@ end
 
 
 local function drawSettingsModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 64, isPocket() and 22 or 24)
+    local mx, my, mw, mh = modalBox(isPocket() and w or 66, isPocket() and 22 or 24)
 
-    modalHeader(mx, my, mw, "Settings", "Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()))
+    modalHeader(mx, my, mw, "Settings", "Scroll options  |  drag header  |  Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()))
 
     text(mx + 1, my + 3, trim("App v" .. appVersion() .. " | Codename: " .. protocolName(), mw - 2), colors.black, colors.lightGray)
     text(mx + 1, my + 4, trim("Compatibility number: " .. tostring(protocolVersion()), mw - 2), colors.gray, colors.lightGray)
 
     local function onoff(v) return v and "ON" or "OFF" end
-    local y = my + 6
+    local options = {}
 
-    addButton("set_time", mx + 1, y, mw - 2, "Show message time: " .. onoff(state.showTimestamps ~= false), colors.black, state.showTimestamps ~= false and T().good or colors.white, function()
+    local function addOpt(id, label, active, action, tint)
+        table.insert(options, {
+            id = id,
+            label = label,
+            active = active,
+            action = action,
+            tint = tint
+        })
+    end
+
+    addOpt("set_time", "Show message time: " .. onoff(state.showTimestamps ~= false), state.showTimestamps ~= false, function()
         toggleBoolSetting("showTimestamps", "Show message time")
     end)
-    y = y + 1
 
-    addButton("set_compact", mx + 1, y, mw - 2, "Compact messages: " .. onoff(state.compactMessages == true), colors.black, state.compactMessages and T().accent or colors.white, function()
+    addOpt("set_compact", "Compact messages: " .. onoff(state.compactMessages == true), state.compactMessages == true, function()
         toggleBoolSetting("compactMessages", "Compact messages")
-    end)
-    y = y + 1
+    end, "accent")
 
-    addButton("set_seen", mx + 1, y, mw - 2, "Show read receipts: " .. onoff(state.showReadReceipts ~= false), colors.black, state.showReadReceipts ~= false and T().good or colors.white, function()
+    addOpt("set_seen", "Show read receipts: " .. onoff(state.showReadReceipts ~= false), state.showReadReceipts ~= false, function()
         toggleBoolSetting("showReadReceipts", "Show read receipts")
     end)
-    y = y + 1
 
-    addButton("set_system", mx + 1, y, mw - 2, "Show system messages: " .. onoff(state.showSystemMessages ~= false), colors.black, state.showSystemMessages ~= false and T().good or colors.white, function()
+    addOpt("set_system", "Show system messages: " .. onoff(state.showSystemMessages ~= false), state.showSystemMessages ~= false, function()
         toggleBoolSetting("showSystemMessages", "Show system messages")
     end)
-    y = y + 1
 
-    addButton("set_slashsystem", mx + 1, y, mw - 2, "Slash output to #system: " .. onoff(state.useSystemSlashChannel ~= false), colors.black, state.useSystemSlashChannel ~= false and T().good or colors.white, function()
+    addOpt("set_slashsystem", "Slash output to local #system: " .. onoff(state.useSystemSlashChannel ~= false), state.useSystemSlashChannel ~= false, function()
         toggleBoolSetting("useSystemSlashChannel", "Slash output to #system")
         ensureSystemChannel()
     end)
-    y = y + 1
 
-    addButton("set_friendnote", mx + 1, y, mw - 2, "Friend notifications: " .. onoff(state.friendNotifications ~= false), colors.black, state.friendNotifications ~= false and T().good or colors.white, function()
+    addOpt("set_friendnote", "Friend notifications: " .. onoff(state.friendNotifications ~= false), state.friendNotifications ~= false, function()
         toggleBoolSetting("friendNotifications", "Friend notifications")
     end)
-    y = y + 1
 
-    addButton("set_pingnote", mx + 1, y, mw - 2, "Ping notifications: " .. onoff(state.pingNotifications ~= false), colors.black, state.pingNotifications ~= false and T().good or colors.white, function()
+    addOpt("set_pingnote", "Ping notifications: " .. onoff(state.pingNotifications ~= false), state.pingNotifications ~= false, function()
         toggleBoolSetting("pingNotifications", "Ping notifications")
     end)
-    y = y + 1
 
-    addButton("set_historysync", mx + 1, y, mw - 2, "Auto history sync: " .. onoff(state.autoHistorySync ~= false), colors.black, state.autoHistorySync ~= false and T().good or colors.white, function()
+    addOpt("set_historysync", "Auto history sync: " .. onoff(state.autoHistorySync ~= false), state.autoHistorySync ~= false, function()
         toggleBoolSetting("autoHistorySync", "Auto history sync")
     end)
-    y = y + 1
 
-    addButton("set_dmprivacy", mx + 1, y, mw - 2, "DM privacy: " .. dmPrivacyLabel(), colors.black, state.dmPrivacy == "anyone" and colors.white or T().warn, cycleDmPrivacy)
-    y = y + 1
+    addOpt("set_dmprivacy", "DM privacy: " .. dmPrivacyLabel(), state.dmPrivacy == "anyone", cycleDmPrivacy, state.dmPrivacy == "anyone" and nil or "warn")
 
-    addButton("set_autojoin", mx + 1, y, mw - 2, "Auto-join public groups: " .. onoff(state.autoJoinPublicGroups ~= false), colors.black, state.autoJoinPublicGroups ~= false and T().good or colors.white, function()
+    addOpt("set_autojoin", "Auto-join public groups: " .. onoff(state.autoJoinPublicGroups ~= false), state.autoJoinPublicGroups ~= false, function()
         toggleBoolSetting("autoJoinPublicGroups", "Auto-join public groups")
     end)
-    y = y + 1
 
-    addButton("set_historyfriends", mx + 1, y, mw - 2, "History sync friends-only: " .. onoff(state.requireFriendForHistory == true), colors.black, state.requireFriendForHistory and T().warn or colors.white, function()
+    addOpt("set_historyfriends", "History sync friends-only: " .. onoff(state.requireFriendForHistory == true), state.requireFriendForHistory == true, function()
         toggleBoolSetting("requireFriendForHistory", "History sync friends-only")
-    end)
-    y = y + 1
+    end, state.requireFriendForHistory and "warn" or nil)
 
-    addButton("set_flood", mx + 1, y, mw - 2, "Auto-block flood spam: " .. onoff(state.autoBlockFlood == true), colors.black, state.autoBlockFlood and T().warn or colors.white, function()
+    addOpt("set_flood", "Auto-block flood spam: " .. onoff(state.autoBlockFlood == true), state.autoBlockFlood == true, function()
         toggleBoolSetting("autoBlockFlood", "Auto-block flood spam")
-    end)
-    y = y + 1
+    end, state.autoBlockFlood and "warn" or nil)
 
-    addButton("set_secalerts", mx + 1, y, mw - 2, "Security alerts: " .. onoff(state.securityAlerts ~= false), colors.black, state.securityAlerts ~= false and T().good or colors.white, function()
+    addOpt("set_secalerts", "Security alerts: " .. onoff(state.securityAlerts ~= false), state.securityAlerts ~= false, function()
         toggleBoolSetting("securityAlerts", "Security alerts")
     end)
-    y = y + 1
 
-    local quietLabel = state.quietVersionWarnings and "Quiet version spam: ON" or "Quiet version spam: OFF"
-    local oldLabel = "Old-client dropdown: " .. legacyCompatLabel()
+    addOpt("set_quiet", state.quietVersionWarnings and "Quiet version spam: ON" or "Quiet version spam: OFF", state.quietVersionWarnings == true, toggleQuietVersionWarnings)
 
-    addButton("set_quiet", mx + 1, y, mw - 2, quietLabel, colors.black, state.quietVersionWarnings and T().good or colors.gray, toggleQuietVersionWarnings)
-    y = y + 1
-    addButton("set_old", mx + 1, y, mw - 2, oldLabel, colors.black, shouldAcceptOldClients() and T().warn or colors.white, cycleLegacyCompatMode)
-    y = y + 1
-    addButton("set_oldtag", mx + 1, y, mw - 2, "Show [OLD] tags: " .. onoff(state.showOldClientTags ~= false), colors.black, state.showOldClientTags ~= false and T().good or colors.white, function()
+    addOpt("set_old", "Old-client mode: " .. legacyCompatLabel(), shouldAcceptOldClients(), cycleLegacyCompatMode, shouldAcceptOldClients() and "warn" or nil)
+
+    addOpt("set_oldtag", "Show [OLD] tags: " .. onoff(state.showOldClientTags ~= false), state.showOldClientTags ~= false, function()
         toggleBoolSetting("showOldClientTags", "Show [OLD] tags")
     end)
-    y = y + 1
-    addButton("set_rwarn", mx + 1, y, mw - 2, "Hide remote version-warning echoes: " .. onoff(state.suppressRemoteVersionWarnings ~= false), colors.black, state.suppressRemoteVersionWarnings ~= false and T().good or colors.white, function()
+
+    addOpt("set_rwarn", "Hide remote version-warning echoes: " .. onoff(state.suppressRemoteVersionWarnings ~= false), state.suppressRemoteVersionWarnings ~= false, function()
         toggleBoolSetting("suppressRemoteVersionWarnings", "Hide remote version-warning echoes")
     end)
 
-    text(mx + 1, my + mh - 2, trim("Tip: /security opens safety, privacy, trust, and backup tools.", mw - 2), colors.gray, colors.lightGray)
+    local listTop = my + 6
+    local listBottom = my + mh - 4
+    local visibleRows = math.max(1, listBottom - listTop + 1)
+    local maxScroll = math.max(0, #options - visibleRows)
+
+    state.settingsScroll = tonumber(state.settingsScroll) or 0
+    if state.settingsScroll < 0 then state.settingsScroll = 0 end
+    if state.settingsScroll > maxScroll then state.settingsScroll = maxScroll end
+
+    local function optionColor(opt)
+        if opt.tint == "warn" then return T().warn end
+        if opt.tint == "accent" then return T().accent end
+        if opt.active then return T().good end
+        return colors.white
+    end
+
+    -- Clean list body so dragging/scrolling does not leave stale labels behind.
+    fill(mx + 1, listTop, mw - 2, visibleRows, colors.lightGray)
+
+    for row = 1, visibleRows do
+        local idx = state.settingsScroll + row
+        local opt = options[idx]
+        if opt then
+            local prefix = "  "
+            if idx == 1 and state.settingsScroll > 0 then prefix = "^ " end
+            if idx == #options and state.settingsScroll < maxScroll then prefix = "v " end
+
+            addButton(opt.id, mx + 1, listTop + row - 1, mw - 4, trim(prefix .. opt.label, mw - 4), colors.black, optionColor(opt), opt.action)
+        end
+    end
+
+    if #options > visibleRows then
+        local percent = math.floor(((state.settingsScroll + visibleRows) / #options) * 100)
+        text(mx + mw - 2, listTop, "|", colors.gray, colors.lightGray)
+        text(mx + mw - 2, listBottom, "|", colors.gray, colors.lightGray)
+        text(mx + 1, my + mh - 3, trim("Scroll: " .. tostring(state.settingsScroll + 1) .. "-" .. tostring(math.min(#options, state.settingsScroll + visibleRows)) .. "/" .. tostring(#options) .. " (" .. tostring(percent) .. "%)  mouse wheel / PgUp / PgDn", mw - 2), colors.gray, colors.lightGray)
+
+        addButton("settings_up", mx + mw - 3, listTop + 1, 2, "^", colors.white, colors.gray, function()
+            state.settingsScroll = math.max(0, (state.settingsScroll or 0) - 3)
+        end)
+        addButton("settings_down", mx + mw - 3, listBottom - 1, 2, "v", colors.white, colors.gray, function()
+            state.settingsScroll = math.min(maxScroll, (state.settingsScroll or 0) + 3)
+        end)
+    else
+        text(mx + 1, my + mh - 3, trim("Tip: /security opens safety, privacy, trust, and backup tools.", mw - 2), colors.gray, colors.lightGray)
+    end
+
     addButton("settings_sec", mx + 1, my + mh - 1, 10, "Security", colors.black, T().warn, openSecurityModal)
+    addButton("settings_top", mx + 12, my + mh - 1, 8, "Top", colors.black, colors.lightGray, function()
+        state.settingsScroll = 0
+    end)
     addButton("settings_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
 
@@ -4265,12 +4320,12 @@ local function drawUpdateModal()
     local fy = my + mh - 1
     addButton("upd_check", mx + 1, fy, 9, "Check", colors.black, T().accent, function()
         state.modal = nil
-        checkForUpdate(false, false, false, state.current)
+        checkForUpdate(false, false, false, nil)
     end)
 
     addButton("upd_install", mx + 11, fy, 10, "Install", colors.black, T().good, function()
         state.modal = nil
-        checkForUpdate(false, true, false, state.current)
+        checkForUpdate(false, true, false, nil)
     end)
 
     addButton("upd_close", mx + mw - 8, fy, 8, "Back", colors.white, colors.gray, openMainMenu)
@@ -5170,6 +5225,21 @@ local function handleKey(key)
         return
     end
 
+    if state.modal == "settings" then
+        if key == keys.up then
+            state.settingsScroll = math.max(0, (state.settingsScroll or 0) - 1)
+        elseif key == keys.down then
+            state.settingsScroll = (state.settingsScroll or 0) + 1
+        elseif key == keys.pageUp then
+            state.settingsScroll = math.max(0, (state.settingsScroll or 0) - 5)
+        elseif key == keys.pageDown then
+            state.settingsScroll = (state.settingsScroll or 0) + 5
+        elseif key == keys.home then
+            state.settingsScroll = 0
+        end
+        return
+    end
+
     if state.screen == "chat" and not state.modal then
         if key == keys.up then
             scrollBy(1)
@@ -5202,14 +5272,19 @@ end
 
 function handleMouseDrag(x, y)
     local d = state.draggingModal
-    if not d then return end
+    if not d then return false end
     local b = state.activeModalBox
-    if not b then return end
+    if not b then return false end
+
+    local nx = math.max(1, math.min(x - (d.dx or 0), w - b.w + 1))
+    local ny = math.max(1, math.min(y - (d.dy or 0), h - b.h + 1))
+
     state.modalPositions = state.modalPositions or {}
-    state.modalPositions[d.key] = {
-        x = math.max(1, math.min(x - (d.dx or 0), w - b.w + 1)),
-        y = math.max(1, math.min(y - (d.dy or 0), h - b.h + 1))
-    }
+    local old = state.modalPositions[d.key] or {}
+    if old.x == nx and old.y == ny then return false end
+
+    state.modalPositions[d.key] = { x = nx, y = ny }
+    return true
 end
 
 local function handleMouse(x, y)
@@ -5249,10 +5324,16 @@ local function handleMouse(x, y)
 end
 
 local function uiLoop()
+    local dirty = true
+
     while state.running do
-        draw()
+        if dirty then
+            draw()
+            dirty = false
+        end
 
         local event, p1, p2, p3 = os.pullEvent()
+        local redraw = true
 
         if event == "char" then
             typeIntoField(p1)
@@ -5264,13 +5345,27 @@ local function uiLoop()
             handleMouse(p2, p3)
 
         elseif event == "mouse_drag" then
-            handleMouseDrag(p2, p3)
+            local moved = handleMouseDrag(p2, p3)
+            local now = os.clock()
+            if moved and now - (state.lastDragDrawClock or 0) >= 0.045 then
+                state.lastDragDrawClock = now
+                redraw = true
+            else
+                redraw = false
+            end
 
         elseif event == "mouse_up" then
             state.draggingModal = nil
+            redraw = true
 
         elseif event == "mouse_scroll" then
-            if state.screen == "chat" and not state.modal then
+            if state.modal == "settings" then
+                if p1 < 0 then
+                    state.settingsScroll = math.max(0, (state.settingsScroll or 0) - 3)
+                else
+                    state.settingsScroll = (state.settingsScroll or 0) + 3
+                end
+            elseif state.screen == "chat" and not state.modal then
                 if p1 < 0 then
                     scrollBy(3)
                 else
@@ -5281,7 +5376,14 @@ local function uiLoop()
         elseif event == "term_resize" then
             w, h = term.getSize()
             clampScroll()
+
+        else
+            -- Unknown events can still come from timers/modems in CraftOS-PC.
+            -- Redraw so network/status changes become visible without keyboard input.
+            redraw = true
         end
+
+        dirty = redraw
     end
 end
 

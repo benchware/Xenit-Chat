@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "20.0.16",
+    version = "20.0.17",
     protocolVersion = 19,
     protocolName = "Aegis",
     protocol = "xenitchat_bus",
@@ -431,11 +431,18 @@ function isTiny()
 end
 
 function isPocket()
-    return state.smallMode == true or w < 50 or h < 18
+    -- True pocket/tiny-layout detection. Do not key this only off Small UI mode,
+    -- because desktop shells still need desktop behavior with shorter text.
+    return w < 50 or h < 18
 end
 
 function isSmall()
     return w < 58 or h < 18
+end
+
+function useSmallUI()
+    -- User-forced compact text/layout, also used automatically on very tight screens.
+    return state.smallMode == true or w < 36 or h < 14
 end
 
 function hasSidebar()
@@ -657,6 +664,13 @@ end
 -- because Update/Security/Settings modals all use it.
 function onoff(value)
     return value and "ON" or "OFF"
+end
+
+function sl(short, long)
+    if useSmallUI and useSmallUI() then
+        return tostring(short or long or "")
+    end
+    return tostring(long or short or "")
 end
 
 function parseVersionParts(value)
@@ -5052,7 +5066,7 @@ function drawCompatDropdownModal()
 end
 
 function drawSettingsModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 66, isPocket() and 22 or 24)
+    local mx, my, mw, mh = modalBox(isPocket() and w or (state.smallMode == true and math.min(58, w - 4) or 66), isPocket() and 22 or 24)
 
     modalHeader(mx, my, mw, "Settings", "Scroll options  |  drag header  |  Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()))
 
@@ -5062,11 +5076,7 @@ function drawSettingsModal()
     local function onoff(v) return v and "ON" or "OFF" end
     local options = {}
 
-    local compactUi = state.smallMode == true or w < 48
-    local function sl(short, long)
-        if compactUi then return short end
-        return long
-    end
+    local compactUi = useSmallUI()
 
     local function addOpt(id, label, active, action, tint)
         table.insert(options, {
@@ -5078,7 +5088,7 @@ function drawSettingsModal()
         })
     end
 
-    addOpt("set_smallmode", "Small UI mode: " .. onoff(state.smallMode == true), state.smallMode == true, function()
+    addOpt("set_smallmode", sl("Small UI: " .. onoff(state.smallMode == true), "Small UI mode: " .. onoff(state.smallMode == true)), state.smallMode == true, function()
         toggleBoolSetting("smallMode", "Small UI mode")
         state.settingsScroll = 0
     end, "accent")
@@ -5292,8 +5302,8 @@ function drawGroupRenameModal()
 end
 
 function drawMainMenuModal()
-    local desiredW = isPocket() and w or 68
-    local desiredH = isPocket() and 18 or 22
+    local desiredW = isPocket() and w or (state.smallMode == true and math.min(56, w - 4) or 68)
+    local desiredH = isPocket() and 18 or (state.smallMode == true and 19 or 22)
     local mx, my, mw, mh = modalBox(desiredW, desiredH, "main_menu")
 
     modalHeader(mx, my, mw, "Menu", trim("Drag header | wheel/arrow to scroll | " .. currentChatTitle(), mw - 2))
@@ -5344,22 +5354,22 @@ function drawMainMenuModal()
         local item = items[idx]
         if item then
             local label = tostring(item[1] or "")
-            if state.smallMode == true or mw < 42 then
+            if useSmallUI() or mw < 42 then
                 local short = {
-                    ["Update Settings + Branch"] = "Updates",
+                    ["Update Settings + Branch"] = "Update Settings",
                     ["Help / Slash Commands"] = "Help",
                     ["People & Friends"] = "People",
-                    ["Friend Inbox"] = "Inbox",
-                    ["Direct Message"] = "DM",
+                    ["Friend Inbox"] = "Friend Inbox",
+                    ["Direct Message"] = "Direct Message",
                     ["Discover Groups"] = "Discover",
-                    ["Chat Settings"] = "Chat opts",
-                    ["Unpin Current Chat"] = "Unpin chat",
-                    ["Pin Current Chat"] = "Pin chat",
-                    ["Mark All Read"] = "Read all",
-                    ["History Sync"] = "Sync",
+                    ["Chat Settings"] = "Chat Settings",
+                    ["Unpin Current Chat"] = "Unpin Chat",
+                    ["Pin Current Chat"] = "Pin Chat",
+                    ["Mark All Read"] = "Mark Read",
+                    ["History Sync"] = "History Sync",
                     ["Security Center"] = "Security",
-                    ["App Controls"] = "App",
-                    ["Close App"] = "Exit"
+                    ["App Controls"] = "App Controls",
+                    ["Close App"] = "Close App"
                 }
                 label = short[label] or label
             elseif mw >= 54 and item[5] and item[5] ~= "" then

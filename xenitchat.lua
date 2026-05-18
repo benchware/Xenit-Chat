@@ -4,16 +4,20 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "19.2.8",
+    version = "20.0.4",
     protocolVersion = 19,
-    protocolName = "Obsidian",
+    protocolName = "Aegis",
     protocol = "xenitchat_bus",
     updateUrl = "https://raw.githubusercontent.com/benchware/Xenit-Chat/main/xenitchat.lua",
+    updateOwner = "benchware",
+    updateRepo = "Xenit-Chat",
+    updatePath = "xenitchat.lua",
 
     accountFile = ".xenit_accounts",
     nodeSecretFile = ".xenit_node_secret",
     prefsFile = ".xenit_prefs",
     historyFile = ".xenit_history",
+    attachmentDir = ".xenit_attachments",
 
     maxMessages = 350,
     messageLimit = 200,
@@ -21,6 +25,11 @@ local APP = {
     historySyncCooldown = 12,
     versionNoticeCooldown = 90,
     maxPacketBytes = 12000,
+    maxAttachmentBytes = 48000,
+    attachmentChunkSize = 5000,
+    attachmentTimeout = 45,
+    attachmentDefaultExpireDays = 3,
+    attachmentStorageLimitKB = 256,
     floodWindow = 6,
     floodLimit = 24,
 
@@ -176,6 +185,35 @@ local THEMES = {
         input = colors.white,
         inputText = colors.black
     }
+    ,
+    aegis = {
+        name = "Aegis",
+        bg = colors.black,
+        panel = colors.gray,
+        top = colors.purple,
+        accent = colors.lightBlue,
+        good = colors.lime,
+        warn = colors.orange,
+        danger = colors.red,
+        text = colors.white,
+        muted = colors.lightGray,
+        input = colors.black,
+        inputText = colors.white
+    },
+    slate = {
+        name = "Slate",
+        bg = colors.black,
+        panel = colors.gray,
+        top = colors.gray,
+        accent = colors.cyan,
+        good = colors.green,
+        warn = colors.yellow,
+        danger = colors.red,
+        text = colors.white,
+        muted = colors.lightGray,
+        input = colors.black,
+        inputText = colors.white
+    }
 }
 
 local state = {
@@ -239,6 +277,12 @@ local state = {
     modalPositions = {},
     draggingModal = nil,
     settingsScroll = 0,
+    compatScroll = 0,
+    branchScroll = 0,
+    updateBranchesRemote = nil,
+    updateBranchesStatus = "fallback",
+    updateBranch = "main",
+    updateCustomBranch = "",
     slashOpenedSystemOutput = false,
     lastDragDrawClock = 0,
     showOldClientTags = true,
@@ -249,6 +293,9 @@ local state = {
     showSystemMessages = true,
     friendNotifications = true,
     pingNotifications = true,
+    attachmentNotifications = true,
+    allowAttachments = true,
+    autoPlayAudio = false,
     autoHistorySync = true,
     dmPrivacy = "anyone",
     autoJoinPublicGroups = true,
@@ -262,6 +309,12 @@ local state = {
     securityEvents = {},
     pingPending = {},
     pingOrder = {},
+    pendingTransfers = {},
+    attachmentLog = {},
+    autoCleanupAttachments = true,
+    attachmentExpireDays = 3,
+    attachmentStorageLimitKB = 256,
+    legacyAttachmentNotice = true,
     restartRequested = false,
     exitReason = nil,
     profile = {
@@ -651,6 +704,16 @@ function legacyCompatLabel()
     return info.label or "Accept old packets only"
 end
 
+function setLegacyCompatMode(mode, quiet)
+    if not LEGACY_COMPAT_MODES[mode] then mode = "off" end
+    state.legacyCompatMode = mode
+    state.allowOldClients = mode ~= "off"
+    savePrefs()
+    if not quiet then
+        systemMessage("Old-client compatibility: " .. legacyCompatLabel() .. (state.allowOldClients and " (BUGGY)" or ""))
+    end
+end
+
 function legacyMirrorVersion()
     local info = legacyCompatInfo()
     return info.target
@@ -675,8 +738,21 @@ function remoteIsOld(publicIdOrUser)
     else
         u = state.users and state.users[publicIdOrUser]
     end
-    local rv = u and tonumber(u.remoteVersion or u.version)
-    return rv ~= nil and rv < protocolVersion()
+    if not u then return false end
+
+    if u.oldClient == true then return true end
+    if u.legacyMirror == true then return true end
+
+    local rv = tonumber(u.remoteVersion or u.version)
+    if rv and rv < protocolVersion() then return true end
+
+    -- Pre-codename/plain builds often do not send protocolName/appVersion.
+    -- Treat them as old for UI tagging even if their numeric version is ambiguous.
+    if state.showOldClientTags ~= false and rv and rv <= protocolVersion() then
+        if not u.remoteProtocolName and not u.protocolName then return true end
+    end
+
+    return false
 end
 
 local function getNodeSecret()
@@ -794,6 +870,8 @@ local function defaultPrefs()
         quietVersionWarnings = true,
         allowOldClients = true,
         legacyCompatMode = "v15",
+        updateBranch = "main",
+        updateCustomBranch = "",
         useSystemSlashChannel = true,
         showOldClientTags = true,
         suppressRemoteVersionWarnings = true,
@@ -803,6 +881,14 @@ local function defaultPrefs()
         showSystemMessages = true,
         friendNotifications = true,
         pingNotifications = true,
+        attachmentNotifications = true,
+        allowAttachments = true,
+        autoPlayAudio = false,
+        autoCleanupAttachments = true,
+        attachmentExpireDays = 3,
+        attachmentStorageLimitKB = 256,
+        legacyAttachmentNotice = true,
+        attachmentLog = {},
         autoHistorySync = true,
         dmPrivacy = "anyone",
         autoJoinPublicGroups = true,
@@ -842,6 +928,8 @@ local function savePrefs()
         quietVersionWarnings = state.quietVersionWarnings,
         allowOldClients = state.allowOldClients,
         legacyCompatMode = state.legacyCompatMode,
+        updateBranch = state.updateBranch,
+        updateCustomBranch = state.updateCustomBranch,
         useSystemSlashChannel = state.useSystemSlashChannel,
         showOldClientTags = state.showOldClientTags,
         suppressRemoteVersionWarnings = state.suppressRemoteVersionWarnings,
@@ -851,6 +939,14 @@ local function savePrefs()
         showSystemMessages = state.showSystemMessages,
         friendNotifications = state.friendNotifications,
         pingNotifications = state.pingNotifications,
+        attachmentNotifications = state.attachmentNotifications,
+        allowAttachments = state.allowAttachments,
+        autoPlayAudio = state.autoPlayAudio,
+        autoCleanupAttachments = state.autoCleanupAttachments,
+        attachmentExpireDays = state.attachmentExpireDays,
+        attachmentStorageLimitKB = state.attachmentStorageLimitKB,
+        legacyAttachmentNotice = state.legacyAttachmentNotice,
+        attachmentLog = state.attachmentLog,
         autoHistorySync = state.autoHistorySync,
         dmPrivacy = state.dmPrivacy,
         autoJoinPublicGroups = state.autoJoinPublicGroups,
@@ -883,6 +979,8 @@ local function loadPrefs()
     if type(data.allowOldClients) ~= "boolean" then data.allowOldClients = true end
     if not LEGACY_COMPAT_MODES[data.legacyCompatMode or "v15"] then data.legacyCompatMode = data.allowOldClients and "v15" or "off" end
     if data.legacyCompatMode == nil then data.legacyCompatMode = "v15" end
+    if type(data.updateBranch) ~= "string" or data.updateBranch == "" then data.updateBranch = "main" end
+    if type(data.updateCustomBranch) ~= "string" then data.updateCustomBranch = "" end
     if type(data.useSystemSlashChannel) ~= "boolean" then data.useSystemSlashChannel = true end
     if type(data.showOldClientTags) ~= "boolean" then data.showOldClientTags = true end
     if type(data.suppressRemoteVersionWarnings) ~= "boolean" then data.suppressRemoteVersionWarnings = true end
@@ -892,6 +990,16 @@ local function loadPrefs()
     if type(data.showSystemMessages) ~= "boolean" then data.showSystemMessages = true end
     if type(data.friendNotifications) ~= "boolean" then data.friendNotifications = true end
     if type(data.pingNotifications) ~= "boolean" then data.pingNotifications = true end
+    if type(data.attachmentNotifications) ~= "boolean" then data.attachmentNotifications = true end
+    if type(data.allowAttachments) ~= "boolean" then data.allowAttachments = true end
+    if type(data.autoPlayAudio) ~= "boolean" then data.autoPlayAudio = false end
+    if type(data.autoCleanupAttachments) ~= "boolean" then data.autoCleanupAttachments = true end
+    if tonumber(data.attachmentExpireDays) == nil then data.attachmentExpireDays = APP.attachmentDefaultExpireDays end
+    data.attachmentExpireDays = tonumber(data.attachmentExpireDays) or APP.attachmentDefaultExpireDays
+    if tonumber(data.attachmentStorageLimitKB) == nil then data.attachmentStorageLimitKB = APP.attachmentStorageLimitKB end
+    data.attachmentStorageLimitKB = tonumber(data.attachmentStorageLimitKB) or APP.attachmentStorageLimitKB
+    if type(data.legacyAttachmentNotice) ~= "boolean" then data.legacyAttachmentNotice = true end
+    if type(data.attachmentLog) ~= "table" then data.attachmentLog = {} end
     if type(data.autoHistorySync) ~= "boolean" then data.autoHistorySync = true end
     if data.dmPrivacy ~= "friends" and data.dmPrivacy ~= "none" then data.dmPrivacy = "anyone" end
     if type(data.autoJoinPublicGroups) ~= "boolean" then data.autoJoinPublicGroups = true end
@@ -915,6 +1023,8 @@ local function loadPrefs()
     state.quietVersionWarnings = data.quietVersionWarnings
     state.allowOldClients = data.allowOldClients
     state.legacyCompatMode = data.legacyCompatMode
+    state.updateBranch = data.updateBranch
+    state.updateCustomBranch = data.updateCustomBranch
     state.useSystemSlashChannel = data.useSystemSlashChannel
     state.showOldClientTags = data.showOldClientTags
     state.suppressRemoteVersionWarnings = data.suppressRemoteVersionWarnings
@@ -924,6 +1034,14 @@ local function loadPrefs()
     state.showSystemMessages = data.showSystemMessages
     state.friendNotifications = data.friendNotifications
     state.pingNotifications = data.pingNotifications
+    state.attachmentNotifications = data.attachmentNotifications
+    state.allowAttachments = data.allowAttachments
+    state.autoPlayAudio = data.autoPlayAudio
+    state.autoCleanupAttachments = data.autoCleanupAttachments
+    state.attachmentExpireDays = data.attachmentExpireDays
+    state.attachmentStorageLimitKB = data.attachmentStorageLimitKB
+    state.legacyAttachmentNotice = data.legacyAttachmentNotice
+    state.attachmentLog = data.attachmentLog
     state.autoHistorySync = data.autoHistorySync
     state.dmPrivacy = data.dmPrivacy
     state.autoJoinPublicGroups = data.autoJoinPublicGroups
@@ -1524,7 +1642,7 @@ local function buildVisualLines(key, width)
         else
             if m.kind == "system" then
                 color = T().muted
-                prefix = state.compactMessages and "· " or "i "
+                prefix = state.compactMessages and "- " or "i "
             elseif m.kind == "warn" then
                 color = T().danger
                 prefix = "! "
@@ -1553,7 +1671,7 @@ local function buildVisualLines(key, width)
 
             if state.showReadReceipts ~= false and m.outgoing and m.seen then
                 table.insert(visual, {
-                    text = state.compactMessages and "  ✓ Seen" or "  Seen",
+                    text = state.compactMessages and "  OK Seen" or "  Seen",
                     color = T().muted
                 })
             end
@@ -1897,6 +2015,193 @@ function safeSendTo(id, kind, data)
 end
 
 
+
+-- ============================================================
+-- Update branch helpers
+-- ============================================================
+
+local httpRead
+
+UPDATE_BRANCHES = {
+    { key = "main", label = "main", branch = "main", note = "default branch" },
+    { key = "aegis", label = "aegis", branch = "aegis", note = "Aegis major branch" },
+    { key = "obsidian", label = "obsidian", branch = "obsidian", note = "Obsidian legacy branch" },
+    { key = "custom", label = "custom", branch = nil, note = "type your own branch" }
+}
+
+function githubBranchesApiUrl()
+    return "https://api.github.com/repos/" .. tostring(APP.updateOwner or "benchware") .. "/" .. tostring(APP.updateRepo or "Xenit-Chat") .. "/branches?per_page=100"
+end
+
+function parseGitHubBranches(raw)
+    local out = {}
+    if type(raw) ~= "string" or raw == "" then return out end
+
+    if textutils and textutils.unserializeJSON then
+        local ok, data = pcall(textutils.unserializeJSON, raw)
+        if ok and type(data) == "table" then
+            for _, item in ipairs(data) do
+                if type(item) == "table" and type(item.name) == "string" then
+                    local name = sanitizeUpdateBranch(item.name)
+                    if name ~= "" then
+                        table.insert(out, { key = name, label = name, branch = name, note = "GitHub branch" })
+                    end
+                end
+            end
+        end
+    end
+
+    -- Fallback parser for older CraftOS builds without JSON helpers.
+    if #out == 0 then
+        for name in raw:gmatch('"name"%s*:%s*"([^"]+)"') do
+            name = sanitizeUpdateBranch(name)
+            if name ~= "" then
+                table.insert(out, { key = name, label = name, branch = name, note = "GitHub branch" })
+            end
+        end
+    end
+
+    table.sort(out, function(a, b)
+        if a.key == "main" then return true end
+        if b.key == "main" then return false end
+        return tostring(a.key) < tostring(b.key)
+    end)
+
+    return out
+end
+
+function getUpdateBranches()
+    local list = {}
+    local seen = {}
+
+    local function add(item)
+        if type(item) ~= "table" then return end
+        local key = sanitizeUpdateBranch(item.key or item.branch or item.label or "")
+        if key == "" or seen[key] then return end
+        seen[key] = true
+        table.insert(list, { key = key, label = item.label or key, branch = item.branch or key, note = item.note or "" })
+    end
+
+    if type(state.updateBranchesRemote) == "table" and #state.updateBranchesRemote > 0 then
+        for _, item in ipairs(state.updateBranchesRemote) do add(item) end
+        add({ key = "custom", label = "custom", branch = nil, note = "type your own branch" })
+    else
+        for _, item in ipairs(UPDATE_BRANCHES) do add(item) end
+    end
+
+    return list
+end
+
+function refreshUpdateBranches(silent, targetKey)
+    if not httpRead then
+        if not silent then systemMessage("Branch refresh unavailable until updater is loaded.", targetKey) end
+        return false
+    end
+
+    local raw, err = httpRead(githubBranchesApiUrl())
+    if not raw then
+        state.updateBranchesStatus = "fallback"
+        if not silent then systemMessage("Branch refresh failed: " .. tostring(err) .. ". Using fallback branches.", targetKey) end
+        return false
+    end
+
+    local branches = parseGitHubBranches(raw)
+    if #branches == 0 then
+        state.updateBranchesStatus = "fallback"
+        if not silent then systemMessage("Branch refresh failed: no branches found. Using fallback branches.", targetKey) end
+        return false
+    end
+
+    state.updateBranchesRemote = branches
+    state.updateBranchesStatus = "github"
+    state.branchScroll = 0
+    if not silent then
+        local names = {}
+        for i, item in ipairs(branches) do names[i] = item.key end
+        systemMessage("GitHub branches loaded: " .. table.concat(names, ", "), targetKey)
+    end
+    return true
+end
+
+function sanitizeUpdateBranch(value)
+    value = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    value = value:gsub("^refs/heads/", "")
+    value = value:gsub("^origin/", "")
+
+    -- Keep branch names friendly for CraftOS and raw.githubusercontent.com.
+    value = value:gsub("[^%w%._%-%/]", "")
+    value = value:gsub("/+", "/")
+    value = value:gsub("^/+", ""):gsub("/+$", "")
+
+    if value == "" then return "main" end
+    return value
+end
+
+function selectedUpdateBranch()
+    local key = state.updateBranch or "main"
+    if key == "custom" then
+        return sanitizeUpdateBranch(state.updateCustomBranch or "main")
+    end
+
+    for _, item in ipairs(getUpdateBranches()) do
+        if item.key == key then
+            return sanitizeUpdateBranch(item.branch or item.key)
+        end
+    end
+
+    return sanitizeUpdateBranch(key)
+end
+
+function updateBranchLabel()
+    local key = state.updateBranch or "main"
+    if key == "custom" then
+        return "custom: " .. selectedUpdateBranch()
+    end
+    return selectedUpdateBranch()
+end
+
+function updateUrlForBranch(branch)
+    branch = sanitizeUpdateBranch(branch or selectedUpdateBranch())
+    return "https://raw.githubusercontent.com/" .. tostring(APP.updateOwner or "benchware") .. "/" .. tostring(APP.updateRepo or "Xenit-Chat") .. "/" .. branch .. "/" .. tostring(APP.updatePath or "xenitchat.lua")
+end
+
+function setUpdateBranch(key, customValue)
+    key = tostring(key or "main")
+    local exists = false
+    for _, item in ipairs(getUpdateBranches()) do
+        if item.key == key then exists = true break end
+    end
+    if not exists then key = "custom" end
+
+    state.updateBranch = key
+    if customValue and tostring(customValue) ~= "" then
+        state.updateCustomBranch = sanitizeUpdateBranch(customValue)
+    elseif key ~= "custom" then
+        state.updateCustomBranch = state.updateCustomBranch or ""
+    elseif not state.updateCustomBranch or state.updateCustomBranch == "" then
+        state.updateCustomBranch = "main"
+    end
+
+    APP.updateUrl = updateUrlForBranch(selectedUpdateBranch())
+    savePrefs()
+end
+
+function openUpdateBranchDropdown()
+    state.modal = "update_branch"
+    state.modalInput = ""
+    state.branchScroll = 0
+end
+
+function openCustomUpdateBranchModal()
+    state.modal = "update_branch_custom"
+    state.modalInput = selectedUpdateBranch()
+end
+
+function showUpdateBranchInfo()
+    systemMessage("Updater branch: " .. updateBranchLabel())
+    systemMessage("Updater URL: " .. updateUrlForBranch(selectedUpdateBranch()))
+end
+
 -- ============================================================
 -- Auto update
 -- ============================================================
@@ -1910,7 +2215,7 @@ local function getProgramPath()
     return "xenitchat.lua"
 end
 
-local function httpRead(url)
+function httpRead(url)
     if not http or not http.get then
         return nil, "HTTP API is disabled. Enable http in CraftOS-PC/CC config."
     end
@@ -1987,10 +2292,13 @@ local function checkForUpdate(auto, install, force, targetKey)
     state.updateBusy = true
 
     if not auto then
-        systemMessage("Checking GitHub for updates...", targetKey)
+        systemMessage("Checking GitHub branch " .. updateBranchLabel() .. " for updates...", targetKey)
     end
 
-    local raw, err = httpRead(APP.updateUrl)
+    local branch = selectedUpdateBranch()
+    local updateUrl = updateUrlForBranch(branch)
+    APP.updateUrl = updateUrl
+    local raw, err = httpRead(updateUrl)
     if not raw then
         if not auto then systemMessage("Update failed: " .. tostring(err), targetKey) end
         state.updateBusy = false
@@ -2009,9 +2317,9 @@ local function checkForUpdate(auto, install, force, targetKey)
     if cmp <= 0 and not force then
         if not auto then
             if cmp == 0 then
-                systemMessage("Already up to date. Local v" .. appVersion() .. ", GitHub v" .. tostring(remoteVersion) .. ".", targetKey)
+                systemMessage("Already up to date. Local v" .. appVersion() .. ", GitHub " .. updateBranchLabel() .. " v" .. tostring(remoteVersion) .. ".", targetKey)
             else
-                systemMessage("Local build is newer than GitHub. Local v" .. appVersion() .. ", GitHub v" .. tostring(remoteVersion) .. ". Use /update force to downgrade/install anyway.", targetKey)
+                systemMessage("Local build is newer than GitHub " .. updateBranchLabel() .. ". Local v" .. appVersion() .. ", remote v" .. tostring(remoteVersion) .. ". Use /update force to downgrade/install anyway.", targetKey)
             end
         end
         state.updateBusy = false
@@ -2028,7 +2336,7 @@ local function checkForUpdate(auto, install, force, targetKey)
     if install then
         installUpdate(raw, remoteVersion, targetKey)
     else
-        systemMessage("Update available: v" .. tostring(remoteVersion) .. " on GitHub. Type /update install.", targetKey)
+        systemMessage("Update available: v" .. tostring(remoteVersion) .. " on GitHub branch " .. updateBranchLabel() .. ". Type /update install.", targetKey)
     end
 
     state.updateBusy = false
@@ -2299,10 +2607,13 @@ function cycleLegacyCompatMode()
     end
     pos = pos + 1
     if pos > #LEGACY_COMPAT_ORDER then pos = 1 end
-    state.legacyCompatMode = LEGACY_COMPAT_ORDER[pos]
-    state.allowOldClients = state.legacyCompatMode ~= "off"
-    savePrefs()
-    systemMessage("Old-client compatibility: " .. legacyCompatLabel() .. (state.allowOldClients and " (BUGGY). Use v15 for your old v15 client; Generic also targets v15; Quartz is for older v19 Quartz clients." or "."))
+    setLegacyCompatMode(LEGACY_COMPAT_ORDER[pos])
+end
+
+function openCompatDropdown()
+    state.modal = "compat_dropdown"
+    state.modalInput = ""
+    state.compatScroll = 0
 end
 
 local function showVersionInfo()
@@ -2612,6 +2923,415 @@ function backupLocalData()
 end
 
 
+-- ============================================================
+
+-- ============================================================
+-- Attachment storage lifecycle
+-- ============================================================
+
+function attachmentExpireSeconds()
+    local days = tonumber(state.attachmentExpireDays or APP.attachmentDefaultExpireDays) or APP.attachmentDefaultExpireDays
+    if days <= 0 then return nil end
+    return days * 86400
+end
+
+function attachmentStorageLimitBytes()
+    local kb = tonumber(state.attachmentStorageLimitKB or APP.attachmentStorageLimitKB) or APP.attachmentStorageLimitKB
+    if kb <= 0 then return nil end
+    return kb * 1024
+end
+
+function fileSizeSafe(path)
+    if fs.getSize then
+        local ok, size = pcall(fs.getSize, path)
+        if ok and type(size) == "number" then return size end
+    end
+    if fs.attributes then
+        local ok, attr = pcall(fs.attributes, path)
+        if ok and type(attr) == "table" and type(attr.size) == "number" then return attr.size end
+    end
+    local raw = readText(path)
+    return raw and #raw or 0
+end
+
+function attachmentLogTime(path)
+    for _, item in ipairs(state.attachmentLog or {}) do
+        if item.path == path then return tonumber(item.time or 0) or 0, tostring(item.kind or "file"), tostring(item.name or fs.getName(path)) end
+    end
+    return 0, "file", fs.getName(path)
+end
+
+function removeAttachmentLogPath(path)
+    if type(state.attachmentLog) ~= "table" then return end
+    for i = #state.attachmentLog, 1, -1 do
+        if state.attachmentLog[i].path == path then table.remove(state.attachmentLog, i) end
+    end
+end
+
+function cleanupAttachments(mode, manual)
+    mode = tostring(mode or "expired"):lower()
+    ensureAttachmentDir()
+    state.attachmentLog = state.attachmentLog or {}
+
+    local now = os.time()
+    local expire = attachmentExpireSeconds()
+    local files = {}
+    local total = 0
+    local removed = 0
+    local removedAudio = 0
+    local removedBytes = 0
+
+    for _, name in ipairs(fs.list(APP.attachmentDir) or {}) do
+        local path = fs.combine(APP.attachmentDir, name)
+        if not fs.isDir(path) then
+            local size = fileSizeSafe(path)
+            local ts, kind, loggedName = attachmentLogTime(path)
+            if ts == 0 then ts = now end
+            total = total + size
+            table.insert(files, { path = path, name = loggedName or name, size = size, time = ts, kind = kind })
+        end
+    end
+
+    local function deleteItem(item)
+        local ok = pcall(fs.delete, item.path)
+        if ok then
+            removed = removed + 1
+            removedBytes = removedBytes + (item.size or 0)
+            if item.kind == "audio" or fileExt(item.path) == "dfpwm" then removedAudio = removedAudio + 1 end
+            removeAttachmentLogPath(item.path)
+        end
+    end
+
+    if mode == "all" then
+        for _, item in ipairs(files) do deleteItem(item) end
+    elseif mode == "audio" then
+        for _, item in ipairs(files) do
+            if item.kind == "audio" or fileExt(item.path) == "dfpwm" then deleteItem(item) end
+        end
+    else
+        if expire then
+            for _, item in ipairs(files) do
+                if now - (item.time or now) >= expire then deleteItem(item) end
+            end
+        end
+        local limit = attachmentStorageLimitBytes()
+        if limit and total - removedBytes > limit then
+            table.sort(files, function(a, b) return (a.time or 0) < (b.time or 0) end)
+            for _, item in ipairs(files) do
+                if total - removedBytes <= limit then break end
+                if fs.exists(item.path) then deleteItem(item) end
+            end
+        end
+    end
+
+    savePrefs()
+    if manual then
+        if removed == 0 then
+            systemMessage("Attachment cleanup: nothing to delete.")
+        else
+            local label = "Attachment cleanup removed " .. tostring(removed) .. " file(s), " .. tostring(math.ceil(removedBytes / 1024)) .. " KB."
+            if removedAudio > 0 then label = label .. " Audio expired: " .. tostring(removedAudio) .. "." end
+            systemMessage(label)
+        end
+    elseif removedAudio > 0 and state.attachmentNotifications ~= false then
+        addMessage("system", "system", "Audio expired: cleaned " .. tostring(removedAudio) .. " old audio attachment(s).", "system", { silent = true })
+    end
+end
+
+function cycleAttachmentExpiry()
+    local values = { 1, 3, 7, 14, 30, 0 }
+    local cur = tonumber(state.attachmentExpireDays or 3) or 3
+    local idx = 1
+    for i, v in ipairs(values) do if v == cur then idx = i break end end
+    idx = idx + 1
+    if idx > #values then idx = 1 end
+    state.attachmentExpireDays = values[idx]
+    savePrefs()
+    systemMessage("Attachment expiry: " .. (state.attachmentExpireDays <= 0 and "OFF" or tostring(state.attachmentExpireDays) .. " day(s)"))
+end
+
+function cycleAttachmentStorageLimit()
+    local values = { 128, 256, 512, 1024, 2048, 0 }
+    local cur = tonumber(state.attachmentStorageLimitKB or 256) or 256
+    local idx = 1
+    for i, v in ipairs(values) do if v == cur then idx = i break end end
+    idx = idx + 1
+    if idx > #values then idx = 1 end
+    state.attachmentStorageLimitKB = values[idx]
+    savePrefs()
+    systemMessage("Attachment storage cap: " .. (state.attachmentStorageLimitKB <= 0 and "OFF" or tostring(state.attachmentStorageLimitKB) .. " KB"))
+end
+
+-- P2P attachments / audio
+-- ============================================================
+
+function ensureAttachmentDir()
+    if not fs.exists(APP.attachmentDir) then fs.makeDir(APP.attachmentDir) end
+end
+
+function safeFilename(value)
+    local s = tostring(value or "file")
+    s = s:gsub("\\", "/")
+    s = s:match("([^/]+)$") or "file"
+    s = s:gsub("[^%w%._%- ]", "_")
+    if s == "" then s = "file" end
+    if #s > 40 then s = s:sub(1, 40) end
+    return s
+end
+
+function fileBaseName(path)
+    return safeFilename(path)
+end
+
+function fileExt(path)
+    local e = tostring(path or ""):lower():match("%.([%w_%-]+)$")
+    return e or ""
+end
+
+function isAudioPath(path)
+    local e = fileExt(path)
+    return e == "dfpwm" or e == "wav" or e == "nbs" or e == "pcm"
+end
+
+function readFileAll(path)
+    if not path or path == "" then return nil, "No file path." end
+    if not fs.exists(path) then return nil, "File not found: " .. tostring(path) end
+    if fs.isDir(path) then return nil, "Folders cannot be sent yet." end
+    local ok, f = pcall(fs.open, path, "rb")
+    if not ok or not f then f = fs.open(path, "r") end
+    if not f then return nil, "Could not open file." end
+    local raw = f.readAll() or ""
+    f.close()
+    return raw
+end
+
+function writeFileAll(path, data)
+    local ok, f = pcall(fs.open, path, "wb")
+    if not ok or not f then f = fs.open(path, "w") end
+    if not f then return false end
+    f.write(data or "")
+    f.close()
+    return true
+end
+
+function uniqueAttachmentPath(name)
+    ensureAttachmentDir()
+    name = safeFilename(name)
+    local path = fs.combine(APP.attachmentDir, name)
+    if not fs.exists(path) then return path end
+    local base, ext = name:match("^(.*)%.([^%.]+)$")
+    base = base or name
+    ext = ext and ("." .. ext) or ""
+    for i = 1, 99 do
+        local candidate = fs.combine(APP.attachmentDir, base .. "_" .. tostring(i) .. ext)
+        if not fs.exists(candidate) then return candidate end
+    end
+    return fs.combine(APP.attachmentDir, tostring(os.time()) .. "_" .. name)
+end
+
+function attachmentTargetInfo()
+    local c = state.convos[state.current] or {}
+    local key = state.current or "global"
+    if key == "system" or c.localOnly then
+        return nil, nil, "Cannot send attachments from #system. Switch to a chat/DM first."
+    end
+    if c.type == "pm" then
+        if not c.peerId then return nil, nil, "This DM has no valid peer ID." end
+        return "pm", c.peerId, nil
+    end
+    return "chat", key, nil
+end
+
+function recordAttachment(path, from, name, size, kind)
+    state.attachmentLog = state.attachmentLog or {}
+    local now = os.time()
+    local expires = nil
+    local secs = attachmentExpireSeconds()
+    if secs then expires = now + secs end
+    table.insert(state.attachmentLog, 1, { path = path, from = from, name = name, size = size, kind = kind, time = now, expires = expires })
+    while #state.attachmentLog > 80 do table.remove(state.attachmentLog) end
+    savePrefs()
+end
+
+function showAttachments()
+    ensureAttachmentDir()
+    systemMessage("Attachments folder: " .. APP.attachmentDir .. " | expires: " .. ((tonumber(state.attachmentExpireDays or 0) or 0) <= 0 and "OFF" or tostring(state.attachmentExpireDays) .. "d") .. " | cap: " .. ((tonumber(state.attachmentStorageLimitKB or 0) or 0) <= 0 and "OFF" or tostring(state.attachmentStorageLimitKB) .. "KB"))
+    systemMessage("Use /cleanattachments expired|audio|all to free storage.")
+    if not state.attachmentLog or #state.attachmentLog == 0 then
+        systemMessage("No received attachments yet. Use /attach path or /audio path.dfpwm.")
+        return
+    end
+    for i = 1, math.min(#state.attachmentLog, 6) do
+        local a = state.attachmentLog[i]
+        systemMessage(" - " .. tostring(a.name) .. " from " .. tostring(a.from or "?") .. " -> " .. tostring(a.path))
+    end
+end
+
+function playAudioFile(path)
+    if not path or path == "" then
+        systemMessage("Usage: /play path.dfpwm")
+        return
+    end
+    local speaker = peripheral.find and peripheral.find("speaker")
+    if not speaker then
+        systemMessage("No speaker peripheral found. Attach a speaker to play DFPWM audio.")
+        return
+    end
+    local data, err = readFileAll(path)
+    if not data then systemMessage(err or "Could not read audio file.") return end
+    if fileExt(path) ~= "dfpwm" then
+        systemMessage("Only DFPWM playback is supported directly. File saved, but convert audio to .dfpwm for playback.")
+        return
+    end
+    local ok, dfpwm = pcall(require, "cc.audio.dfpwm")
+    if not ok or not dfpwm then
+        systemMessage("DFPWM decoder unavailable in this CraftOS build.")
+        return
+    end
+    local decoder = dfpwm.make_decoder()
+    local chunkSize = 16 * 1024
+    systemMessage("Playing " .. fileBaseName(path) .. "...")
+    for i = 1, #data, chunkSize do
+        local buffer = decoder(data:sub(i, i + chunkSize - 1))
+        while not speaker.playAudio(buffer) do os.pullEvent("speaker_audio_empty") end
+    end
+end
+
+
+function sendLegacyAttachmentNotice(base, kind, name, size)
+    if state.legacyAttachmentNotice == false then return end
+    if not legacyMirrorVersion() then return end
+    local kb = tostring(math.ceil((tonumber(size) or 0) / 1024)) .. " KB"
+    local body = "[unsupported attachment] " .. tostring(kind or "file") .. ": " .. tostring(name or "file") .. " (" .. kb .. "). Update XenitChat to receive attachments."
+    local data = {}
+    if base.mode == "pm" then
+        data.toPublicId = base.target
+        data.toName = base.title
+        data.body = body
+        data.compatAttachmentNotice = true
+        data.msgId = "legacy-attach-" .. tostring(base.transferId or randomToken(8))
+        local packet = makeLegacyPacket("pm", data)
+        if packet then rednet.broadcast(packet, APP.protocol) end
+    else
+        data.key = base.key
+        data.title = base.title
+        data.private = false
+        data.listed = true
+        data.body = body
+        data.compatAttachmentNotice = true
+        data.msgId = "legacy-attach-" .. tostring(base.transferId or randomToken(8))
+        local packet = makeLegacyPacket("chat", data)
+        if packet then rednet.broadcast(packet, APP.protocol) end
+    end
+end
+
+function sendAttachment(path, forcedKind)
+    if state.allowAttachments == false then
+        systemMessage("Attachments are disabled in Settings.")
+        return
+    end
+    local mode, target, err = attachmentTargetInfo()
+    if err then systemMessage(err) return end
+    local raw, readErr = readFileAll(path)
+    if not raw then systemMessage(readErr or "Could not read file.") return end
+    if #raw <= 0 then systemMessage("Cannot send an empty file.") return end
+    if #raw > APP.maxAttachmentBytes then
+        systemMessage("Attachment too large: " .. tostring(math.ceil(#raw / 1024)) .. " KB. Limit is " .. tostring(math.floor(APP.maxAttachmentBytes / 1024)) .. " KB.")
+        return
+    end
+
+    local name = fileBaseName(path)
+    local kind = forcedKind or (isAudioPath(path) and "audio" or "file")
+    local transferId = randomToken(12)
+    local chunkSize = APP.attachmentChunkSize
+    local total = math.ceil(#raw / chunkSize)
+    local c = state.convos[state.current] or {}
+
+    local base = { transferId = transferId, key = state.current, title = c.title or state.current, mode = mode, target = target, filename = name, size = #raw, total = total, attachmentKind = kind }
+    sendLegacyAttachmentNotice(base, kind, name, #raw)
+    broadcast("attachment_start", base)
+    for i = 1, total do
+        broadcast("attachment_chunk", { transferId = transferId, mode = mode, target = target, index = i, data = raw:sub((i - 1) * chunkSize + 1, i * chunkSize) })
+    end
+    broadcast("attachment_end", { transferId = transferId, mode = mode, target = target })
+
+    local label = (kind == "audio" and "[audio] " or "[file] ") .. name .. " (" .. tostring(math.ceil(#raw / 1024)) .. " KB)"
+    addMessage(state.current, myName(), label, c.type == "pm" and "pm" or "chat", { outgoing = true, msgId = transferId })
+    if state.autoCleanupAttachments ~= false then cleanupAttachments("expired", false) end
+    systemMessage("Attachment sent: " .. name .. " in " .. tostring(total) .. " chunk(s). Older clients see an unsupported-attachment note.")
+end
+
+function attachmentPacketIntended(msg)
+    if msg.mode == "pm" then return msg.target == state.publicId end
+    if msg.mode == "chat" then
+        if msg.key == "global" then return true end
+        return state.convos[msg.key] ~= nil or (state.autoJoinPublicGroups ~= false and msg.key and msg.key ~= "system")
+    end
+    return false
+end
+
+function receiveAttachmentStart(msg)
+    if state.allowAttachments == false then return end
+    if not attachmentPacketIntended(msg) then return end
+    if tonumber(msg.size or 0) > APP.maxAttachmentBytes then
+        recordSecurityEvent("Dropped oversized attachment from " .. tostring(msg.user or "unknown") .. ".")
+        return
+    end
+    state.pendingTransfers = state.pendingTransfers or {}
+    state.pendingTransfers[msg.transferId] = { from = msg.user, fromId = msg.publicId, key = msg.key or "global", filename = safeFilename(msg.filename), size = tonumber(msg.size or 0), total = tonumber(msg.total or 0), kind = msg.attachmentKind or "file", chunks = {}, started = os.clock() }
+    if state.attachmentNotifications ~= false then
+        systemMessage("Receiving " .. tostring(msg.attachmentKind or "file") .. ": " .. safeFilename(msg.filename) .. " from " .. displayName(msg.user, msg.publicId, msg.profile) .. ".")
+    end
+end
+
+function receiveAttachmentChunk(msg)
+    local t = state.pendingTransfers and state.pendingTransfers[msg.transferId]
+    if not t then return end
+    if os.clock() - (t.started or 0) > APP.attachmentTimeout then
+        state.pendingTransfers[msg.transferId] = nil
+        recordSecurityEvent("Attachment transfer timed out.")
+        return
+    end
+    local idx = tonumber(msg.index or 0)
+    if idx < 1 or idx > (t.total or 0) then return end
+    t.chunks[idx] = tostring(msg.data or "")
+end
+
+function receiveAttachmentEnd(msg)
+    local t = state.pendingTransfers and state.pendingTransfers[msg.transferId]
+    if not t then return end
+    local parts = {}
+    local size = 0
+    for i = 1, t.total do
+        if not t.chunks[i] then
+            systemMessage("Attachment incomplete: " .. tostring(t.filename) .. ".")
+            return
+        end
+        parts[i] = t.chunks[i]
+        size = size + #parts[i]
+    end
+    if size > APP.maxAttachmentBytes then
+        state.pendingTransfers[msg.transferId] = nil
+        recordSecurityEvent("Dropped attachment after size check.")
+        return
+    end
+    local path = uniqueAttachmentPath(t.filename)
+    if not writeFileAll(path, table.concat(parts)) then
+        systemMessage("Could not save attachment: " .. tostring(t.filename))
+        return
+    end
+    state.pendingTransfers[msg.transferId] = nil
+    recordAttachment(path, t.from, t.filename, size, t.kind)
+    local key = t.key or "global"
+    if key ~= "system" then ensureConvo(key, key, "public", false, true, t.from or "unknown") end
+    local label = (t.kind == "audio" and "[audio received] " or "[file received] ") .. t.filename .. " -> " .. path
+    addMessage(key, displayName(t.from, t.fromId, nil), label, "system", { msgId = msg.transferId })
+    if state.autoCleanupAttachments ~= false then cleanupAttachments("expired", false) end
+    if t.kind == "audio" and state.autoPlayAudio == true and fileExt(path) == "dfpwm" then
+        playAudioFile(path)
+    end
+end
+
 COMMAND_HELP = {
     {
         title = "Navigate",
@@ -2665,11 +3385,24 @@ COMMAND_HELP = {
             { cmd = "/name", args = "display name", desc = "Set your display name." }
         }
     },
+
+    {
+        title = "Attachments",
+        items = {
+            { cmd = "/attach", args = "path", desc = "Send a small file to the current chat/DM using P2P chunks." },
+            { cmd = "/script", args = "path.lua", desc = "Send a Lua script attachment. Receiver must choose to run it manually." },
+            { cmd = "/audio", args = "path.dfpwm", desc = "Send an audio attachment. DFPWM plays best on speaker peripherals." },
+            { cmd = "/play", args = "path", desc = "Play a local/received DFPWM audio file through a speaker." },
+            { cmd = "/attachments", desc = "Show received attachment folder and recent transfer info.", aliases = {"/files"} },
+            { cmd = "/cleanattachments", args = "[expired|audio|all]", desc = "Clear expired attachments, audio files, or every received attachment." }
+        }
+    },
     {
         title = "System",
         items = {
             { cmd = "/sync", desc = "Request chat history sync.", aliases = {"/history"} },
-            { cmd = "/update", args = "[check|install|force]", desc = "Check or install GitHub update." },
+            { cmd = "/update", args = "[check|install|force|branch <name>]", desc = "Check/install GitHub update from selected branch." },
+            { cmd = "/branch", args = "[name|refresh]", desc = "Choose or refresh GitHub branches for updater." },
             { cmd = "/version", desc = "Show app/protocol version.", aliases = {"/about"} },
             { cmd = "/compat", desc = "Cycle old-client target: Generic, v15, v18, v7, v19 plain. BUGGY.", aliases = {"/legacy", "/oldclients"} },
             { cmd = "/quiet", desc = "Toggle version warning noise filter." },
@@ -2803,8 +3536,28 @@ local function handleSlashCommand(body)
             checkForUpdate(false, true, false, nil)
         elseif mode == "force" then
             checkForUpdate(false, true, true, nil)
+        elseif mode:match("^branch%s+") then
+            local br = rest:match("^%S+%s+(.+)$") or ""
+            setUpdateBranch("custom", br)
+            systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+        elseif mode == "branch refresh" or mode == "branches refresh" or mode == "refresh branches" then
+            refreshUpdateBranches(false, nil)
+            openUpdateBranchDropdown()
+        elseif mode == "branch" or mode == "branches" then
+            openUpdateBranchDropdown()
         else
             checkForUpdate(false, false, false, nil)
+        end
+    elseif command == "branch" or command == "branches" then
+        local lowerRest = rest:lower()
+        if lowerRest == "refresh" or lowerRest == "reload" or lowerRest == "scan" then
+            refreshUpdateBranches(false, nil)
+            openUpdateBranchDropdown()
+        elseif rest ~= "" then
+            setUpdateBranch("custom", rest)
+            systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+        else
+            openUpdateBranchDropdown()
         end
     elseif command == "who" or command == "online" then
         listOnlineUsers()
@@ -2819,13 +3572,26 @@ local function handleSlashCommand(body)
     elseif command == "quiet" then
         toggleQuietVersionWarnings()
     elseif command == "compat" or command == "legacy" or command == "oldclients" then
-        cycleLegacyCompatMode()
+        openCompatDropdown()
     elseif command == "audit" then
         showSecurityAudit()
     elseif command == "backup" then
         backupLocalData()
     elseif command == "ping" then
         sendPing(rest)
+    elseif command == "attach" then
+        if rest == "" then systemMessage("Usage: /attach path") else sendAttachment(rest, nil) end
+    elseif command == "script" then
+        if rest == "" then systemMessage("Usage: /script path.lua") else sendAttachment(rest, "script") end
+    elseif command == "audio" then
+        if rest == "" then systemMessage("Usage: /audio path.dfpwm") else sendAttachment(rest, "audio") end
+    elseif command == "play" then
+        playAudioFile(rest)
+    elseif command == "attachments" or command == "files" then
+        showAttachments()
+    elseif command == "cleanattachments" or command == "cleanupattachments" or command == "clearattachments" then
+        local mode = rest ~= "" and rest or "expired"
+        cleanupAttachments(mode, true)
 
     elseif command == "version" or command == "about" then
         showVersionInfo()
@@ -3668,7 +4434,7 @@ end
 local function drawPeopleModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 11 or 13)
 
-    modalHeader(mx, my, mw, "People & Friends", "online • friends first • click a user")
+    modalHeader(mx, my, mw, "People & Friends", "online | friends first | click a user")
 
     local list = getSortedUsers()
     local maxRows = mh - 5
@@ -3967,6 +4733,57 @@ local function drawProfileModal()
 end
 
 
+
+local function drawCompatDropdownModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 62, isPocket() and 18 or 20, "compat_dropdown")
+
+    modalHeader(mx, my, mw, "Old-client compatibility", "Choose target. All mirror modes are BUGGY.")
+
+    text(mx + 1, my + 3, trim("Current: " .. legacyCompatLabel(), mw - 2), colors.black, colors.lightGray)
+    text(mx + 1, my + 4, trim("Use v15 for your old v15 client. Plain/no-codename is for pre-codename v19.", mw - 2), colors.gray, colors.lightGray)
+
+    local listTop = my + 6
+    local listBottom = my + mh - 3
+    local visibleRows = math.max(1, listBottom - listTop + 1)
+    local maxScroll = math.max(0, #LEGACY_COMPAT_ORDER - visibleRows)
+
+    state.compatScroll = tonumber(state.compatScroll) or 0
+    if state.compatScroll < 0 then state.compatScroll = 0 end
+    if state.compatScroll > maxScroll then state.compatScroll = maxScroll end
+
+    fill(mx + 1, listTop, mw - 2, visibleRows, colors.lightGray)
+
+    for row = 1, visibleRows do
+        local idx = state.compatScroll + row
+        local key = LEGACY_COMPAT_ORDER[idx]
+        local info = key and LEGACY_COMPAT_MODES[key]
+        if info then
+            local selected = key == (state.legacyCompatMode or "off")
+            local label = (selected and "[x] " or "[ ] ") .. tostring(info.label or key)
+            local bgc = selected and T().accent or colors.white
+            local col = selected and colors.black or colors.black
+            addButton("compat_" .. key, mx + 1, listTop + row - 1, mw - 4, trim(label, mw - 4), col, bgc, function()
+                setLegacyCompatMode(key)
+                state.modal = "settings"
+            end)
+        end
+    end
+
+    if #LEGACY_COMPAT_ORDER > visibleRows then
+        text(mx + 1, my + mh - 2, trim("Scroll: " .. tostring(state.compatScroll + 1) .. "-" .. tostring(math.min(#LEGACY_COMPAT_ORDER, state.compatScroll + visibleRows)) .. "/" .. tostring(#LEGACY_COMPAT_ORDER), mw - 12), colors.gray, colors.lightGray)
+        addButton("compat_up", mx + mw - 6, my + mh - 2, 2, "^", colors.white, colors.gray, function()
+            state.compatScroll = math.max(0, (state.compatScroll or 0) - 3)
+        end)
+        addButton("compat_down", mx + mw - 3, my + mh - 2, 2, "v", colors.white, colors.gray, function()
+            state.compatScroll = math.min(maxScroll, (state.compatScroll or 0) + 3)
+        end)
+    end
+
+    addButton("compat_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, function()
+        state.modal = "settings"
+    end)
+end
+
 local function drawSettingsModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 66, isPocket() and 22 or 24)
 
@@ -4017,6 +4834,34 @@ local function drawSettingsModal()
         toggleBoolSetting("pingNotifications", "Ping notifications")
     end)
 
+    addOpt("set_attach", "Attachments: " .. onoff(state.allowAttachments ~= false), state.allowAttachments ~= false, function()
+        toggleBoolSetting("allowAttachments", "Attachments")
+    end, "accent")
+
+    addOpt("set_attachnote", "Attachment notifications: " .. onoff(state.attachmentNotifications ~= false), state.attachmentNotifications ~= false, function()
+        toggleBoolSetting("attachmentNotifications", "Attachment notifications")
+    end)
+
+    addOpt("set_autoplay", "Auto-play received audio: " .. onoff(state.autoPlayAudio == true), state.autoPlayAudio == true, function()
+        toggleBoolSetting("autoPlayAudio", "Auto-play audio")
+    end, state.autoPlayAudio and "warn" or nil)
+
+    addOpt("set_autoclean", "Auto-clean attachments: " .. onoff(state.autoCleanupAttachments ~= false), state.autoCleanupAttachments ~= false, function()
+        toggleBoolSetting("autoCleanupAttachments", "Auto-clean attachments")
+    end)
+
+    addOpt("set_expire", "Attachment expiry: " .. ((tonumber(state.attachmentExpireDays or 0) or 0) <= 0 and "OFF" or tostring(state.attachmentExpireDays) .. " day(s)"), (tonumber(state.attachmentExpireDays or 0) or 0) > 0, cycleAttachmentExpiry, "accent")
+
+    addOpt("set_storagecap", "Attachment storage cap: " .. ((tonumber(state.attachmentStorageLimitKB or 0) or 0) <= 0 and "OFF" or tostring(state.attachmentStorageLimitKB) .. " KB"), (tonumber(state.attachmentStorageLimitKB or 0) or 0) > 0, cycleAttachmentStorageLimit, "accent")
+
+    addOpt("set_legattach", "Legacy attachment unsupported note: " .. onoff(state.legacyAttachmentNotice ~= false), state.legacyAttachmentNotice ~= false, function()
+        toggleBoolSetting("legacyAttachmentNotice", "Legacy attachment notice")
+    end)
+
+    addOpt("set_cleanaudio", "Clean expired/audio storage now", false, function()
+        cleanupAttachments("expired", true)
+    end, "warn")
+
     addOpt("set_historysync", "Auto history sync: " .. onoff(state.autoHistorySync ~= false), state.autoHistorySync ~= false, function()
         toggleBoolSetting("autoHistorySync", "Auto history sync")
     end)
@@ -4041,7 +4886,9 @@ local function drawSettingsModal()
 
     addOpt("set_quiet", state.quietVersionWarnings and "Quiet version spam: ON" or "Quiet version spam: OFF", state.quietVersionWarnings == true, toggleQuietVersionWarnings)
 
-    addOpt("set_old", "Old-client mode: " .. legacyCompatLabel(), shouldAcceptOldClients(), cycleLegacyCompatMode, shouldAcceptOldClients() and "warn" or nil)
+    addOpt("set_old", "Old-client mode: " .. legacyCompatLabel(), shouldAcceptOldClients(), openCompatDropdown, shouldAcceptOldClients() and "warn" or nil)
+
+    addOpt("set_branch", "Update branch: " .. updateBranchLabel(), false, openUpdateBranchDropdown, "accent")
 
     addOpt("set_oldtag", "Show [OLD] tags: " .. onoff(state.showOldClientTags ~= false), state.showOldClientTags ~= false, function()
         toggleBoolSetting("showOldClientTags", "Show [OLD] tags")
@@ -4308,14 +5155,93 @@ local function drawHelpModal()
 end
 
 
+
+function drawUpdateBranchModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 56, isPocket() and 16 or 18, "update_branch")
+
+    modalHeader(mx, my, mw, "Updater branch", "Choose GitHub branch for /update")
+    text(mx + 1, my + 3, trim("Current: " .. updateBranchLabel(), mw - 2), colors.black, colors.lightGray)
+    text(mx + 1, my + 4, trim("Repo: " .. tostring(APP.updateOwner or "benchware") .. "/" .. tostring(APP.updateRepo or "Xenit-Chat"), mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 5, trim("Source: " .. (state.updateBranchesStatus == "github" and "GitHub API" or "fallback") .. " | Refresh to scan", mw - 2), colors.gray, colors.lightGray)
+
+    local branches = getUpdateBranches()
+    local listTop = my + 7
+    local listBottom = my + mh - 3
+    local visibleRows = math.max(1, listBottom - listTop + 1)
+    local maxScroll = math.max(0, #branches - visibleRows)
+
+    state.branchScroll = tonumber(state.branchScroll) or 0
+    if state.branchScroll < 0 then state.branchScroll = 0 end
+    if state.branchScroll > maxScroll then state.branchScroll = maxScroll end
+
+    fill(mx + 1, listTop, mw - 2, visibleRows, colors.lightGray)
+
+    for row = 1, visibleRows do
+        local idx = state.branchScroll + row
+        local item = branches[idx]
+        if item then
+            local selected = (state.updateBranch or "main") == item.key
+            local label = (selected and "[x] " or "[ ] ") .. tostring(item.label or item.key)
+            if item.note and item.note ~= "" then label = label .. " - " .. tostring(item.note) end
+            local bgc = selected and T().accent or colors.white
+            addButton("branch_" .. item.key, mx + 1, listTop + row - 1, mw - 4, trim(label, mw - 4), colors.black, bgc, function()
+                if item.key == "custom" then
+                    openCustomUpdateBranchModal()
+                else
+                    setUpdateBranch(item.key)
+                    state.modal = "settings"
+                    systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+                end
+            end)
+        end
+    end
+
+    if #branches > visibleRows then
+        text(mx + 1, my + mh - 2, trim("Scroll: " .. tostring(state.branchScroll + 1) .. "-" .. tostring(math.min(#branches, state.branchScroll + visibleRows)) .. "/" .. tostring(#branches), mw - 12), colors.gray, colors.lightGray)
+        addButton("branch_up", mx + mw - 6, my + mh - 2, 2, "^", colors.white, colors.gray, function()
+            state.branchScroll = math.max(0, (state.branchScroll or 0) - 3)
+        end)
+        addButton("branch_down", mx + mw - 3, my + mh - 2, 2, "v", colors.white, colors.gray, function()
+            state.branchScroll = math.min(maxScroll, (state.branchScroll or 0) + 3)
+        end)
+    end
+
+    addButton("branch_info", mx + 1, my + mh - 1, 7, "Info", colors.black, colors.lightGray, showUpdateBranchInfo)
+    addButton("branch_refresh", mx + 9, my + mh - 1, 9, "Refresh", colors.black, T().accent, function()
+        refreshUpdateBranches(false)
+    end)
+    addButton("branch_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, function()
+        state.modal = "settings"
+    end)
+end
+
+function drawCustomUpdateBranchModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 48, isPocket() and 8 or 9, "update_branch_custom")
+
+    modalHeader(mx, my, mw, "Custom branch", "Type branch name")
+    text(mx + 1, my + 3, "Branch:", colors.black, colors.lightGray)
+    fill(mx + 9, my + 3, mw - 10, 1, colors.white)
+    text(mx + 10, my + 3, trim(state.modalInput, mw - 12), colors.black, colors.white)
+    text(mx + 1, my + 5, trim("Example: main, dev, beta, feature/test", mw - 2), colors.gray, colors.lightGray)
+
+    addButton("branch_custom_save", mx + 1, my + mh - 1, 8, "Save", colors.black, T().good, function()
+        setUpdateBranch("custom", state.modalInput)
+        state.modal = "settings"
+        state.modalInput = ""
+        systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+    end)
+
+    addButton("branch_custom_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openUpdateBranchDropdown)
+end
+
 local function drawUpdateModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 10 or 11)
 
     modalHeader(mx, my, mw, "Auto Update", nil)
     text(mx + 1, my + 3, trim("Source: GitHub benchware/Xenit-Chat", mw - 2), colors.black, colors.lightGray)
-    text(mx + 1, my + 4, trim("Local version: v" .. appVersion() .. " | " .. protocolName(), mw - 2), colors.gray, colors.lightGray)
-    text(mx + 1, my + 5, trim("Startup checks install newer versions automatically.", mw - 2), colors.gray, colors.lightGray)
-    text(mx + 1, my + 6, trim("Manual: /update or /update install", mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 4, trim("Branch: " .. updateBranchLabel(), mw - 2), colors.black, colors.lightGray)
+    text(mx + 1, my + 5, trim("Local version: v" .. appVersion() .. " | " .. protocolName(), mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 6, trim("Manual: /update, /update install, /branch", mw - 2), colors.gray, colors.lightGray)
 
     local fy = my + mh - 1
     addButton("upd_check", mx + 1, fy, 9, "Check", colors.black, T().accent, function()
@@ -4328,11 +5254,13 @@ local function drawUpdateModal()
         checkForUpdate(false, true, false, nil)
     end)
 
+    addButton("upd_branch", mx + 22, fy, 10, "Branch", colors.black, colors.lightGray, openUpdateBranchDropdown)
+
     addButton("upd_close", mx + mw - 8, fy, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
 
 local function drawThemeModal()
-    local names = { "midnight", "dark", "ocean", "neon", "graphite", "forest", "sunset", "amethyst", "ice", "clean" }
+    local names = { "aegis", "midnight", "slate", "dark", "ocean", "neon", "graphite", "forest", "sunset", "amethyst", "ice", "clean" }
     local rows = math.min(#names, math.max(3, h - 5))
     local mx, my, mw, mh = modalBox(isPocket() and w or 40, rows + 4)
 
@@ -4460,6 +5388,12 @@ local function drawModal()
         drawHelpModal()
     elseif state.modal == "settings" then
         drawSettingsModal()
+    elseif state.modal == "compat_dropdown" then
+        drawCompatDropdownModal()
+    elseif state.modal == "update_branch" then
+        drawUpdateBranchModal()
+    elseif state.modal == "update_branch_custom" then
+        drawCustomUpdateBranchModal()
     elseif state.modal == "security" then
         drawSecurityModal()
     elseif state.modal == "group_settings" then
@@ -4490,6 +5424,12 @@ local function drawModal()
         drawUpdateModal()
     elseif state.modal == "app_controls" then
         drawAppControlsModal()
+    elseif state.modal == "update_branch_custom" then
+        setUpdateBranch("custom", state.modalInput)
+        state.modal = "settings"
+        state.modalInput = ""
+        systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+
     elseif state.modal == "error" then
         drawErrorModal()
     end
@@ -4516,7 +5456,7 @@ local function drawTopBar()
         text(1, 1, left, colors.white, T().top)
         text(math.max(1, w - #right + 1), 1, right, colors.yellow, T().top)
     else
-        local left = APP.name .. "  " .. title
+        local left = APP.name .. " v" .. appVersion() .. "  " .. title
         local right = "@" .. myName() .. " | " .. tostring(onlineCount()) .. " online"
 
         if unread > 0 then right = tostring(unread) .. " unread | " .. right end
@@ -4753,7 +5693,10 @@ local QUIET_VERSION_KINDS = {
     history_reply = true,
     read = true,
     ping = true,
-    pong = true
+    pong = true,
+    attachment_start = true,
+    attachment_chunk = true,
+    attachment_end = true
 }
 
 local function shouldShowVersionNotice(msg)
@@ -4852,16 +5795,23 @@ local function handleNetworkMessage(senderId, msg)
 
     recordIdentity(msg.publicId, msg)
 
+    local remoteVersionNumber = tonumber(msg.version)
+    local remoteOldClient = false
+    if remoteVersionNumber and remoteVersionNumber < protocolVersion() then remoteOldClient = true end
+    if msg.compatMirror == true then remoteOldClient = true end
+    if remoteVersionNumber and remoteVersionNumber <= protocolVersion() and not msg.protocolName and not msg.appVersion then remoteOldClient = true end
+
     state.users[msg.publicId] = {
         username = msg.user,
         publicId = msg.publicId,
         nodeId = msg.nodeId,
         senderId = senderId,
         profile = msg.profile or {},
-        remoteVersion = tonumber(msg.version),
+        remoteVersion = remoteVersionNumber,
         remoteAppVersion = msg.appVersion or tostring(msg.version),
         remoteProtocolName = msg.protocolName,
         legacyMirror = msg.compatMirror == true,
+        oldClient = remoteOldClient,
         lastSeenClock = os.clock()
     }
 
@@ -5052,6 +6002,15 @@ local function handleNetworkMessage(senderId, msg)
             systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " removed you as a friend.")
         end
 
+    elseif msg.kind == "attachment_start" then
+        receiveAttachmentStart(msg)
+
+    elseif msg.kind == "attachment_chunk" then
+        receiveAttachmentChunk(msg)
+
+    elseif msg.kind == "attachment_end" then
+        receiveAttachmentEnd(msg)
+
     elseif msg.kind == "read" then
         if msg.toPublicId == state.publicId then
             local key = pmKeyFor(msg.publicId, msg.user)
@@ -5106,7 +6065,7 @@ local function typeIntoField(char)
     end
 
     if state.modal then
-        if state.modal == "create" or state.modal == "pm" or state.modal == "friend_search" or state.modal == "profile" or state.modal == "group_rename" then
+        if state.modal == "create" or state.modal == "pm" or state.modal == "friend_search" or state.modal == "profile" or state.modal == "group_rename" or state.modal == "update_branch_custom" then
             if #state.modalInput < APP.messageLimit then
                 state.modalInput = state.modalInput .. char
             end
@@ -5240,6 +6199,36 @@ local function handleKey(key)
         return
     end
 
+    if state.modal == "update_branch" then
+        if key == keys.up then
+            state.branchScroll = math.max(0, (state.branchScroll or 0) - 1)
+        elseif key == keys.down then
+            state.branchScroll = (state.branchScroll or 0) + 1
+        elseif key == keys.pageUp then
+            state.branchScroll = math.max(0, (state.branchScroll or 0) - 5)
+        elseif key == keys.pageDown then
+            state.branchScroll = (state.branchScroll or 0) + 5
+        elseif key == keys.home then
+            state.branchScroll = 0
+        end
+        return
+    end
+
+    if state.modal == "compat_dropdown" then
+        if key == keys.up then
+            state.compatScroll = math.max(0, (state.compatScroll or 0) - 1)
+        elseif key == keys.down then
+            state.compatScroll = (state.compatScroll or 0) + 1
+        elseif key == keys.pageUp then
+            state.compatScroll = math.max(0, (state.compatScroll or 0) - 5)
+        elseif key == keys.pageDown then
+            state.compatScroll = (state.compatScroll or 0) + 5
+        elseif key == keys.home then
+            state.compatScroll = 0
+        end
+        return
+    end
+
     if state.screen == "chat" and not state.modal then
         if key == keys.up then
             scrollBy(1)
@@ -5365,6 +6354,18 @@ local function uiLoop()
                 else
                     state.settingsScroll = (state.settingsScroll or 0) + 3
                 end
+            elseif state.modal == "compat_dropdown" then
+                if p1 < 0 then
+                    state.compatScroll = math.max(0, (state.compatScroll or 0) - 3)
+                else
+                    state.compatScroll = (state.compatScroll or 0) + 3
+                end
+            elseif state.modal == "update_branch" then
+                if p1 < 0 then
+                    state.branchScroll = math.max(0, (state.branchScroll or 0) - 3)
+                else
+                    state.branchScroll = (state.branchScroll or 0) + 3
+                end
             elseif state.screen == "chat" and not state.modal then
                 if p1 < 0 then
                     scrollBy(3)
@@ -5396,7 +6397,9 @@ local function boot()
     if type(term.setCursorBlink) == "function" then term.setCursorBlink(false) end
     openModem()
     loadPrefs()
+    APP.updateUrl = updateUrlForBranch(selectedUpdateBranch())
     loadHistory()
+    if state.autoCleanupAttachments ~= false then cleanupAttachments("expired", false) end
     tryRememberLogin()
 
     parallel.waitForAny(networkLoop, uiLoop)

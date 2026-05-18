@@ -4,9 +4,9 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "20.0.17",
-    protocolVersion = 19,
-    protocolName = "Aegis",
+    version = "21.0.1",
+    protocolVersion = 20,
+    protocolName = "Oxygen",
     protocol = "xenitchat_bus",
     updateUrl = "https://raw.githubusercontent.com/benchware/Xenit-Chat/main/xenitchat.lua",
     updateOwner = "benchware",
@@ -14,6 +14,7 @@ local APP = {
     updatePath = "xenitchat.lua",
 
     accountFile = ".xenit_accounts",
+    authFile = ".xenit_auth",
     nodeSecretFile = ".xenit_node_secret",
     prefsFile = ".xenit_prefs",
     historyFile = ".xenit_history",
@@ -23,6 +24,7 @@ local APP = {
     messageLimit = 200,
     historySyncLimit = 80,
     historySyncCooldown = 12,
+    relaySyncCooldown = 10,
     versionNoticeCooldown = 90,
     maxPacketBytes = 12000,
     maxAttachmentBytes = 1024 * 1024,
@@ -305,6 +307,10 @@ local state = {
     allowAttachments = true,
     autoPlayAudio = false,
     autoHistorySync = true,
+    p2pRelayMode = false,
+    authSync = true,
+    authLookupPending = {},
+    relayLastSync = {},
     dmPrivacy = "anyone",
     autoJoinPublicGroups = true,
     requireFriendForHistory = false,
@@ -719,10 +725,11 @@ LEGACY_COMPAT_MODES = {
     v17 = { label = "Known v17 mirror (BUGGY)", target = 17, plain = true, accept = true },
     v18 = { label = "Known v18 mirror (BUGGY)", target = 18, plain = true, accept = true },
     v19_plain = { label = "v19 plain/no codename (BUGGY)", target = 19, plain = true, accept = true },
-    v19_quartz = { label = "Quartz v19 legacy (BUGGY)", target = 19, plain = false, accept = true, protocolName = "Quartz" }
+    v19_quartz = { label = "Quartz v19 legacy (BUGGY)", target = 19, plain = false, accept = true, protocolName = "Quartz" },
+    v20_aegis = { label = "Oxygen v20 legacy (BUGGY)", target = 19, plain = false, accept = true, protocolName = "Aegis" }
 }
 
-LEGACY_COMPAT_ORDER = { "off", "accept", "generic", "v15", "v18", "v17", "v16", "v14", "v12", "v10", "v8", "v7", "v19_plain", "v19_quartz" }
+LEGACY_COMPAT_ORDER = { "off", "accept", "generic", "v15", "v18", "v17", "v16", "v14", "v12", "v10", "v8", "v7", "v19_plain", "v19_quartz", "v20_aegis" }
 
 function legacyCompatInfo()
     return LEGACY_COMPAT_MODES[state.legacyCompatMode or "accept"] or LEGACY_COMPAT_MODES.accept
@@ -756,7 +763,7 @@ end
 function shouldMirrorForLegacy(kind)
     local v = legacyMirrorVersion()
     if not v then return false end
-    if v == protocolVersion() and state.legacyCompatMode ~= "v19_plain" and state.legacyCompatMode ~= "v19_quartz" then return false end
+    if v == protocolVersion() and state.legacyCompatMode ~= "v19_plain" and state.legacyCompatMode ~= "v19_quartz" and state.legacyCompatMode ~= "v20_aegis" then return false end
     return kind == "hello" or kind == "hello_ack" or kind == "chat" or kind == "pm" or kind == "read" or kind == "channel_create" or kind == "channel_rename" or kind == "join" or kind == "friend_request" or kind == "friend_accept" or kind == "friend_decline" or kind == "friend_cancel" or kind == "unfriend"
 end
 
@@ -819,8 +826,199 @@ function accountIntegrity(username, account, nodeSecret)
     return slowHash(raw, APP.integrityRounds)
 end
 
+
+-- ============================================================
+-- Portable Aegis auth helpers
+-- ============================================================
+
+function tableCount(t)
+    local n = 0
+    if type(t) == "table" then for _ in pairs(t) do n = n + 1 end end
+    return n
+end
+
+function loadAuthStore()
+    local data = readSerialized(APP.authFile or ".xenit_auth", {})
+    if type(data) ~= "table" then data = {} end
+    if type(data.accounts) ~= "table" then data.accounts = {} end
+    if type(data.revision) ~= "number" then data.revision = 0 end
+    return data
+end
+
+function saveAuthStore(data)
+    if type(data) ~= "table" then data = { accounts = {}, revision = 0 } end
+    if type(data.accounts) ~= "table" then data.accounts = {} end
+    data.revision = (tonumber(data.revision) or 0) + 1
+    data.savedAt = os.time()
+    data.appVersion = appVersion()
+    writeSerialized(APP.authFile or ".xenit_auth", data)
+end
+
+function portablePublicId(username, salt, passHash)
+    return slowHash("PUB2|" .. tostring(username or "") .. "|" .. tostring(salt or "") .. "|" .. tostring(passHash or ""), APP.publicRounds)
+end
+
+function normalizeAuthRecord(username, rec)
+    if type(rec) ~= "table" then return nil end
+    local u = tostring(rec.username or username or "")
+    if u == "" or not rec.salt or not rec.passHash then return nil end
+    local publicId = rec.publicId or portablePublicId(u, rec.salt, rec.passHash)
+    return {
+        username = u,
+        salt = rec.salt,
+        passHash = rec.passHash,
+        publicId = publicId,
+        created = rec.created or os.time(),
+        updated = rec.updated or os.time(),
+        authV2 = true,
+        portable = true,
+        source = rec.source or "local"
+    }
+end
+
+function savePortableAuthRecord(username, record, quiet)
+    local rec = normalizeAuthRecord(username, record)
+    if not rec then return false end
+    local store = loadAuthStore()
+    local existing = store.accounts[rec.username]
+    if existing and existing.passHash and existing.passHash ~= rec.passHash then
+        if not quiet and recordSecurityEvent then
+            recordSecurityEvent("Auth conflict ignored for username " .. tostring(rec.username) .. ".")
+        end
+        return false
+    end
+    store.accounts[rec.username] = rec
+    saveAuthStore(store)
+    local accounts = readSerialized(APP.accountFile, {})
+    accounts[rec.username] = rec
+    writeSerialized(APP.accountFile, accounts)
+    return true
+end
+
+function migrateAccountToPortable(username, account, password)
+    if type(account) ~= "table" then return end
+    if account.authV2 or account.portable then
+        savePortableAuthRecord(username, account, true)
+        return
+    end
+    -- Keep old node-bound account valid, but also create a portable record for new devices.
+    local rec = {
+        username = username,
+        salt = account.salt,
+        passHash = account.passHash,
+        publicId = account.publicId or portablePublicId(username, account.salt, account.passHash),
+        created = account.created or os.time(),
+        updated = os.time(),
+        authV2 = true,
+        portable = true,
+        source = "migrated"
+    }
+    savePortableAuthRecord(username, rec, true)
+end
+
+function exportAuthRecord(username)
+    local store = loadAuthStore()
+    local rec = store.accounts and store.accounts[username]
+    if not rec then
+        local accounts = readSerialized(APP.accountFile, {})
+        rec = accounts[username]
+    end
+    return normalizeAuthRecord(username, rec)
+end
+
+function mergeAuthRecords(records)
+    local changed = 0
+    if type(records) ~= "table" then return 0 end
+    for username, rec in pairs(records) do
+        if savePortableAuthRecord(username, rec, true) then
+            changed = changed + 1
+        end
+    end
+    return changed
+end
+
+function requestAuthLookup(username)
+    username = tostring(username or "")
+    if username == "" then return end
+    state.authLookupPending = state.authLookupPending or {}
+    state.authLookupPending[username] = os.clock()
+    rednet.broadcast({
+        app = APP.name,
+        kind = "auth_lookup",
+        usernameLookup = username,
+        requesterId = os.getComputerID(),
+        version = protocolVersion(),
+        appVersion = appVersion(),
+        protocolName = protocolName(),
+        packetId = "auth-lookup-" .. randomToken(10),
+        time = os.time()
+    }, APP.protocol)
+end
+
+function broadcastAuthOffer(username)
+    if state.authSync == false then return end
+    local rec = exportAuthRecord(username or state.username)
+    if not rec then return end
+    broadcast("auth_offer", { authRecord = rec })
+end
+
+function requestRelaySync(senderId, publicId)
+    if state.authSync == false or not senderId or not publicId then return end
+    state.relayLastSync = state.relayLastSync or {}
+    local now = os.clock()
+    if state.relayLastSync[publicId] and now - state.relayLastSync[publicId] < APP.relaySyncCooldown then return end
+    state.relayLastSync[publicId] = now
+    safeSendTo(senderId, "relay_sync_request", {
+        wantAuth = true,
+        wantHistory = true,
+        knownAuthRevision = (loadAuthStore().revision or 0)
+    })
+end
+
+function handleUnauthAuthLookup(senderId, msg)
+    local wanted = tostring(msg.usernameLookup or "")
+    if wanted == "" then return end
+    local rec = exportAuthRecord(wanted)
+    if rec then
+        rednet.send(senderId, {
+            app = APP.name,
+            kind = "auth_reply",
+            usernameLookup = wanted,
+            authRecord = rec,
+            version = protocolVersion(),
+            appVersion = appVersion(),
+            protocolName = protocolName(),
+            packetId = "auth-reply-" .. randomToken(10),
+            time = os.time()
+        }, APP.protocol)
+    end
+end
+
+function handleUnauthAuthReply(senderId, msg)
+    local rec = normalizeAuthRecord(msg.usernameLookup, msg.authRecord)
+    if not rec then return end
+    if savePortableAuthRecord(rec.username, rec, true) then
+        ensureSystemChannel()
+        addMessage("system", "system", "Synced auth for " .. rec.username .. ". Try login again.", "system", { silent = true })
+    end
+end
+
+function handleUnauthPacket(senderId, msg)
+    if type(msg) ~= "table" or msg.app ~= APP.name then return false end
+    if msg.kind == "auth_lookup" then handleUnauthAuthLookup(senderId, msg) return true end
+    if msg.kind == "auth_reply" then handleUnauthAuthReply(senderId, msg) return true end
+    return false
+end
+
 function loadAccounts()
-    return readSerialized(APP.accountFile, {})
+    local accounts = readSerialized(APP.accountFile, {})
+    if type(accounts) ~= "table" then accounts = {} end
+    local auth = loadAuthStore()
+    for username, rec in pairs(auth.accounts or {}) do
+        local n = normalizeAuthRecord(username, rec)
+        if n then accounts[username] = n end
+    end
+    return accounts
 end
 
 function saveAccounts(accounts)
@@ -828,20 +1026,23 @@ function saveAccounts(accounts)
 end
 
 function buildAccount(username, password)
-    local nodeSecret = getNodeSecret()
     local salt = randomToken(32)
-    local publicId = getPublicId(nodeSecret)
+    local passHash = passwordHash(password, salt)
+    local publicId = portablePublicId(username, salt, passHash)
 
     local account = {
         username = username,
         salt = salt,
-        passHash = passwordHash(password, salt),
+        passHash = passHash,
         nodeId = os.getComputerID(),
         publicId = publicId,
-        created = os.time()
+        created = os.time(),
+        updated = os.time(),
+        authV2 = true,
+        portable = true
     }
 
-    account.integrity = accountIntegrity(username, account, nodeSecret)
+    savePortableAuthRecord(username, account, true)
     return account
 end
 
@@ -850,15 +1051,24 @@ function verifyAccount(username, account)
         return false, "Account record missing."
     end
 
-    local nodeSecret = getNodeSecret()
-    local expectedPublicId = getPublicId(nodeSecret)
-
     if account.username ~= username then
         return false, "Username mismatch."
     end
 
+    -- Aegis portable accounts are intentionally not locked to one computer ID.
+    -- Older node-bound accounts still verify using their original integrity check.
+    if account.authV2 or account.portable then
+        if not account.salt or not account.passHash or not account.publicId then
+            return false, "Portable account is incomplete."
+        end
+        return true, "OK"
+    end
+
+    local nodeSecret = getNodeSecret()
+    local expectedPublicId = getPublicId(nodeSecret)
+
     if tonumber(account.nodeId) ~= tonumber(os.getComputerID()) then
-        return false, "Account belongs to another device."
+        return false, "Account belongs to another device. Use Aegis auth sync or copy .xenit_auth."
     end
 
     if account.publicId ~= expectedPublicId then
@@ -925,6 +1135,8 @@ function defaultPrefs()
         legacyAttachmentNotice = true,
         attachmentLog = {},
         autoHistorySync = true,
+        p2pRelayMode = false,
+        authSync = true,
         dmPrivacy = "anyone",
         autoJoinPublicGroups = true,
         requireFriendForHistory = false,
@@ -1004,6 +1216,8 @@ function savePrefs()
         legacyAttachmentNotice = state.legacyAttachmentNotice,
         attachmentLog = state.attachmentLog,
         autoHistorySync = state.autoHistorySync,
+        p2pRelayMode = state.p2pRelayMode,
+        authSync = state.authSync,
         dmPrivacy = state.dmPrivacy,
         autoJoinPublicGroups = state.autoJoinPublicGroups,
         requireFriendForHistory = state.requireFriendForHistory,
@@ -1062,6 +1276,8 @@ function loadPrefs()
     if type(data.legacyAttachmentNotice) ~= "boolean" then data.legacyAttachmentNotice = true end
     if type(data.attachmentLog) ~= "table" then data.attachmentLog = {} end
     if type(data.autoHistorySync) ~= "boolean" then data.autoHistorySync = true end
+    if type(data.p2pRelayMode) ~= "boolean" then data.p2pRelayMode = false end
+    if type(data.authSync) ~= "boolean" then data.authSync = true end
     if data.dmPrivacy ~= "friends" and data.dmPrivacy ~= "none" then data.dmPrivacy = "anyone" end
     if type(data.autoJoinPublicGroups) ~= "boolean" then data.autoJoinPublicGroups = true end
     if type(data.requireFriendForHistory) ~= "boolean" then data.requireFriendForHistory = false end
@@ -1115,6 +1331,10 @@ function loadPrefs()
     state.legacyAttachmentNotice = data.legacyAttachmentNotice
     state.attachmentLog = data.attachmentLog
     state.autoHistorySync = data.autoHistorySync
+    state.p2pRelayMode = data.p2pRelayMode
+    state.authSync = data.authSync
+    if type(state.authLookupPending) ~= "table" then state.authLookupPending = {} end
+    if type(state.relayLastSync) ~= "table" then state.relayLastSync = {} end
     state.dmPrivacy = data.dmPrivacy
     state.autoJoinPublicGroups = data.autoJoinPublicGroups
     state.requireFriendForHistory = data.requireFriendForHistory
@@ -1303,6 +1523,14 @@ function addMessage(key, from, body, kind, meta)
     }
 
     table.insert(state.messages[key], entry)
+    if meta.historical then
+        table.sort(state.messages[key], function(a, b)
+            local ae = tonumber(a.epoch or 0) or 0
+            local be = tonumber(b.epoch or 0) or 0
+            if ae ~= be then return ae < be end
+            return tostring(a.msgId or "") < tostring(b.msgId or "")
+        end)
+    end
     rememberMessage(key, msgId)
 
     while #state.messages[key] > APP.maxMessages do
@@ -1312,11 +1540,13 @@ function addMessage(key, from, body, kind, meta)
         end
     end
 
-    touchConvo(key)
+    if not meta.historical then
+        touchConvo(key)
+    end
 
     if key == state.current then
-        state.scroll = 0
-    elseif not meta.silent then
+        if not meta.historical then state.scroll = 0 end
+    elseif not meta.silent and not meta.historical then
         state.convos[key].unread = (state.convos[key].unread or 0) + 1
     end
 
@@ -1448,6 +1678,7 @@ function loadHistory()
                         time = m.time,
                         epoch = m.epoch,
                         silent = true,
+                        historical = true,
                         skipSave = true
                     })
                 end
@@ -1550,7 +1781,8 @@ function importHistoryBundles(bundles, senderPublicId)
                             seen = m.seen,
                             time = m.time,
                             epoch = m.epoch,
-                            silent = true
+                            silent = true,
+                            historical = true
                         })
 
                         if added then imported = imported + 1 end
@@ -3632,6 +3864,8 @@ COMMAND_HELP = {
             { cmd = "/privacy", desc = "Cycle DM privacy: anyone, friends-only, no DMs." },
             { cmd = "/audit", desc = "Run a quick security audit." },
             { cmd = "/backup", desc = "Backup preferences and local chat history." },
+            { cmd = "/relay", args = "on|off", desc = "Use this computer as always-on Aegis relay." },
+            { cmd = "/authsync", args = "on|off", desc = "Sync portable .xenit_auth with peers/relay." },
             { cmd = "/app", desc = "Open app controls.", aliases = {"/controls"} },
             { cmd = "/logout", desc = "Logout to the login screen." },
             { cmd = "/exit", desc = "Close XenitChat.", aliases = {"/quit", "/close"} },
@@ -3725,7 +3959,7 @@ function isSystemSlashCommand(command)
         cleanattachments = true, cleanupattachments = true, clearattachments = true,
         clearsystem = true, ["clear-system"] = true, systemclear = true,
         security = true, safe = true, privacy = true, compat = true, legacy = true, oldclients = true,
-        attachments = true, files = true
+        attachments = true, files = true, relay = true, authsync = true, auth = true
     }
     return systemCommands[command] == true
 end
@@ -3836,6 +4070,35 @@ function handleSlashCommand(body)
     elseif command == "clearsystem" or command == "clear-system" or command == "systemclear" then
         clearSystemChannel(true)
 
+    elseif command == "relay" then
+        local r = rest:lower()
+        if r == "on" or r == "enable" then
+            state.p2pRelayMode = true
+            savePrefs()
+            systemMessage("Oxygen Relay mode: ON. Keep this computer online to relay auth/history metadata.")
+        elseif r == "off" or r == "disable" then
+            state.p2pRelayMode = false
+            savePrefs()
+            systemMessage("Oxygen Relay mode: OFF.")
+        else
+            systemMessage("Oxygen Relay mode: " .. (state.p2pRelayMode and "ON" or "OFF") .. ". Use /relay on or /relay off.")
+        end
+    elseif command == "authsync" or command == "auth" then
+        local r = rest:lower()
+        if r == "on" or r == "enable" then
+            state.authSync = true
+            savePrefs()
+            broadcastAuthOffer(state.username)
+            systemMessage("Auth sync: ON. Shared .xenit_auth metadata will sync with peers/relay.")
+        elseif r == "off" or r == "disable" then
+            state.authSync = false
+            savePrefs()
+            systemMessage("Auth sync: OFF.")
+        else
+            requestAuthLookup(state.input or state.username or "")
+            broadcastAuthOffer(state.username)
+            systemMessage("Auth sync: " .. (state.authSync ~= false and "ON" or "OFF") .. ". Use /authsync on|off. .xenit_auth records: " .. tostring(tableCount and tableCount((loadAuthStore().accounts or {})) or 0))
+        end
     elseif command == "version" or command == "about" then
         showVersionInfo()
     elseif command == "sync" or command == "history" then
@@ -4140,7 +4403,7 @@ end
 
 function finishLogin(username, account, remembered)
     state.username = username
-    state.publicId = account.publicId
+    state.publicId = account.publicId or portablePublicId(username, account.salt, account.passHash)
 
     if not state.profile.display or state.profile.display == "" then
         state.profile.display = username
@@ -4178,7 +4441,8 @@ function login()
     local account = accounts[username]
 
     if not account then
-        setError("Account does not exist.")
+        requestAuthLookup(username)
+        setError("Account not local. Asked peers/relay for .xenit_auth. Try again in a moment.")
         return
     end
 
@@ -4194,7 +4458,10 @@ function login()
         return
     end
 
-    finishLogin(username, account, false)
+    migrateAccountToPortable(username, account, password)
+    local fresh = exportAuthRecord(username) or account
+    finishLogin(username, fresh, false)
+    broadcastAuthOffer(username)
 end
 
 function register()
@@ -4228,7 +4495,9 @@ function register()
     saveAccounts(accounts)
 
     state.profile.display = username
+    savePortableAuthRecord(username, account, true)
     finishLogin(username, account, false)
+    broadcastAuthOffer(username)
 end
 
 function tryRememberLogin()
@@ -5153,6 +5422,15 @@ function drawSettingsModal()
     addOpt("set_historysync", sl("History sync: " .. onoff(state.autoHistorySync ~= false), "Auto history sync: " .. onoff(state.autoHistorySync ~= false)), state.autoHistorySync ~= false, function()
         toggleBoolSetting("autoHistorySync", "Auto history sync")
     end)
+
+    addOpt("set_authsync", sl("Auth sync: " .. onoff(state.authSync ~= false), "Portable .xenit_auth sync: " .. onoff(state.authSync ~= false)), state.authSync ~= false, function()
+        toggleBoolSetting("authSync", "Portable auth sync")
+        if state.authSync ~= false then broadcastAuthOffer(state.username) end
+    end, "accent")
+
+    addOpt("set_relay", sl("Relay: " .. onoff(state.p2pRelayMode == true), "Oxygen always-on relay: " .. onoff(state.p2pRelayMode == true)), state.p2pRelayMode == true, function()
+        toggleBoolSetting("p2pRelayMode", "Aegis relay mode")
+    end, "accent")
 
     addOpt("set_dmprivacy", sl("DM: " .. dmPrivacyLabel(), "DM privacy: " .. dmPrivacyLabel()), state.dmPrivacy == "anyone", cycleDmPrivacy, state.dmPrivacy == "anyone" and nil or "warn")
 
@@ -6218,11 +6496,18 @@ function handleNetHello(senderId, msg)
     if state.autoHistorySync ~= false then
         requestHistorySync(senderId, msg.publicId)
     end
+    if state.authSync ~= false then
+        requestRelaySync(senderId, msg.publicId)
+        broadcastAuthOffer(state.username)
+    end
 end
 
 function handleNetHelloAck(senderId, msg)
     if state.autoHistorySync ~= false then
         requestHistorySync(senderId, msg.publicId)
+    end
+    if state.authSync ~= false then
+        requestRelaySync(senderId, msg.publicId)
     end
 end
 
@@ -6426,12 +6711,53 @@ function handleNetRead(senderId, msg)
     end
 end
 
+
+function handleNetAuthOffer(senderId, msg)
+    if state.authSync == false then return end
+    if msg.authRecord then
+        local n = normalizeAuthRecord(msg.authRecord.username, msg.authRecord)
+        if n and savePortableAuthRecord(n.username, n, true) and state.p2pRelayMode == true then
+            recordSecurityEvent("Relay learned auth for " .. tostring(n.username) .. ".")
+        end
+    end
+end
+
+function handleNetRelaySyncRequest(senderId, msg)
+    if state.authSync == false then return end
+    local payload = {}
+    if state.p2pRelayMode == true or msg.wantAuth == true then
+        payload.auth = loadAuthStore().accounts or {}
+    end
+    if msg.wantHistory == true then
+        payload.bundles = makeHistoryBundle(historyKeysForPeer(msg.publicId), msg.publicId)
+    end
+    safeSendTo(senderId, "relay_sync_reply", payload)
+end
+
+function handleNetRelaySyncReply(senderId, msg)
+    if state.authSync ~= false and msg.auth then
+        local count = mergeAuthRecords(msg.auth)
+        if count > 0 then
+            addMessage("system", "system", "Synced " .. tostring(count) .. " auth record(s) from relay/peer.", "system", { silent = true })
+        end
+    end
+    if type(msg.bundles) == "table" then
+        local imported = importHistoryBundles(msg.bundles, msg.publicId)
+        if imported > 0 then
+            addMessage("system", "system", "Relay synced " .. tostring(imported) .. " older message(s).", "system", { silent = true })
+        end
+    end
+end
+
 NET_KIND_HANDLERS = {
     hello = handleNetHello,
     hello_ack = handleNetHelloAck,
     ping = handleNetPing,
     pong = function(senderId, msg) receivePong(msg) end,
     update_meta = handleNetUpdateMeta,
+    auth_offer = handleNetAuthOffer,
+    relay_sync_request = handleNetRelaySyncRequest,
+    relay_sync_reply = handleNetRelaySyncReply,
     history_request = handleNetHistoryRequest,
     history_reply = handleNetHistoryReply,
     discover = handleNetDiscover,
@@ -6472,6 +6798,7 @@ end
 function handleNetworkMessage(senderId, msg)
     if type(msg) ~= "table" then return end
     if msg.app ~= APP.name then return end
+    if handleUnauthPacket(senderId, msg) then return end
     if packetByteSize(msg) > APP.maxPacketBytes then
         recordSecurityEvent("Dropped oversized network packet.")
         return
@@ -6511,7 +6838,7 @@ function networkLoop()
         if senderId then
             local ok, err = pcall(handleNetworkMessage, senderId, msg)
             if not ok then
-                addMessage("global", "system", "Network packet skipped: " .. trim(err, 80), "warn")
+                addMessage("system", "system", "Network packet skipped: " .. trim(err, 80), "warn", { silent = true })
             end
         end
     end

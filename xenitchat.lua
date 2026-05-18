@@ -4,11 +4,14 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "20.0.2",
+    version = "20.0.4",
     protocolVersion = 19,
     protocolName = "Aegis",
     protocol = "xenitchat_bus",
     updateUrl = "https://raw.githubusercontent.com/benchware/Xenit-Chat/main/xenitchat.lua",
+    updateOwner = "benchware",
+    updateRepo = "Xenit-Chat",
+    updatePath = "xenitchat.lua",
 
     accountFile = ".xenit_accounts",
     nodeSecretFile = ".xenit_node_secret",
@@ -275,6 +278,11 @@ local state = {
     draggingModal = nil,
     settingsScroll = 0,
     compatScroll = 0,
+    branchScroll = 0,
+    updateBranchesRemote = nil,
+    updateBranchesStatus = "fallback",
+    updateBranch = "main",
+    updateCustomBranch = "",
     slashOpenedSystemOutput = false,
     lastDragDrawClock = 0,
     showOldClientTags = true,
@@ -862,6 +870,8 @@ local function defaultPrefs()
         quietVersionWarnings = true,
         allowOldClients = true,
         legacyCompatMode = "v15",
+        updateBranch = "main",
+        updateCustomBranch = "",
         useSystemSlashChannel = true,
         showOldClientTags = true,
         suppressRemoteVersionWarnings = true,
@@ -918,6 +928,8 @@ local function savePrefs()
         quietVersionWarnings = state.quietVersionWarnings,
         allowOldClients = state.allowOldClients,
         legacyCompatMode = state.legacyCompatMode,
+        updateBranch = state.updateBranch,
+        updateCustomBranch = state.updateCustomBranch,
         useSystemSlashChannel = state.useSystemSlashChannel,
         showOldClientTags = state.showOldClientTags,
         suppressRemoteVersionWarnings = state.suppressRemoteVersionWarnings,
@@ -967,6 +979,8 @@ local function loadPrefs()
     if type(data.allowOldClients) ~= "boolean" then data.allowOldClients = true end
     if not LEGACY_COMPAT_MODES[data.legacyCompatMode or "v15"] then data.legacyCompatMode = data.allowOldClients and "v15" or "off" end
     if data.legacyCompatMode == nil then data.legacyCompatMode = "v15" end
+    if type(data.updateBranch) ~= "string" or data.updateBranch == "" then data.updateBranch = "main" end
+    if type(data.updateCustomBranch) ~= "string" then data.updateCustomBranch = "" end
     if type(data.useSystemSlashChannel) ~= "boolean" then data.useSystemSlashChannel = true end
     if type(data.showOldClientTags) ~= "boolean" then data.showOldClientTags = true end
     if type(data.suppressRemoteVersionWarnings) ~= "boolean" then data.suppressRemoteVersionWarnings = true end
@@ -1009,6 +1023,8 @@ local function loadPrefs()
     state.quietVersionWarnings = data.quietVersionWarnings
     state.allowOldClients = data.allowOldClients
     state.legacyCompatMode = data.legacyCompatMode
+    state.updateBranch = data.updateBranch
+    state.updateCustomBranch = data.updateCustomBranch
     state.useSystemSlashChannel = data.useSystemSlashChannel
     state.showOldClientTags = data.showOldClientTags
     state.suppressRemoteVersionWarnings = data.suppressRemoteVersionWarnings
@@ -1999,6 +2015,193 @@ function safeSendTo(id, kind, data)
 end
 
 
+
+-- ============================================================
+-- Update branch helpers
+-- ============================================================
+
+local httpRead
+
+UPDATE_BRANCHES = {
+    { key = "main", label = "main", branch = "main", note = "default branch" },
+    { key = "aegis", label = "aegis", branch = "aegis", note = "Aegis major branch" },
+    { key = "obsidian", label = "obsidian", branch = "obsidian", note = "Obsidian legacy branch" },
+    { key = "custom", label = "custom", branch = nil, note = "type your own branch" }
+}
+
+function githubBranchesApiUrl()
+    return "https://api.github.com/repos/" .. tostring(APP.updateOwner or "benchware") .. "/" .. tostring(APP.updateRepo or "Xenit-Chat") .. "/branches?per_page=100"
+end
+
+function parseGitHubBranches(raw)
+    local out = {}
+    if type(raw) ~= "string" or raw == "" then return out end
+
+    if textutils and textutils.unserializeJSON then
+        local ok, data = pcall(textutils.unserializeJSON, raw)
+        if ok and type(data) == "table" then
+            for _, item in ipairs(data) do
+                if type(item) == "table" and type(item.name) == "string" then
+                    local name = sanitizeUpdateBranch(item.name)
+                    if name ~= "" then
+                        table.insert(out, { key = name, label = name, branch = name, note = "GitHub branch" })
+                    end
+                end
+            end
+        end
+    end
+
+    -- Fallback parser for older CraftOS builds without JSON helpers.
+    if #out == 0 then
+        for name in raw:gmatch('"name"%s*:%s*"([^"]+)"') do
+            name = sanitizeUpdateBranch(name)
+            if name ~= "" then
+                table.insert(out, { key = name, label = name, branch = name, note = "GitHub branch" })
+            end
+        end
+    end
+
+    table.sort(out, function(a, b)
+        if a.key == "main" then return true end
+        if b.key == "main" then return false end
+        return tostring(a.key) < tostring(b.key)
+    end)
+
+    return out
+end
+
+function getUpdateBranches()
+    local list = {}
+    local seen = {}
+
+    local function add(item)
+        if type(item) ~= "table" then return end
+        local key = sanitizeUpdateBranch(item.key or item.branch or item.label or "")
+        if key == "" or seen[key] then return end
+        seen[key] = true
+        table.insert(list, { key = key, label = item.label or key, branch = item.branch or key, note = item.note or "" })
+    end
+
+    if type(state.updateBranchesRemote) == "table" and #state.updateBranchesRemote > 0 then
+        for _, item in ipairs(state.updateBranchesRemote) do add(item) end
+        add({ key = "custom", label = "custom", branch = nil, note = "type your own branch" })
+    else
+        for _, item in ipairs(UPDATE_BRANCHES) do add(item) end
+    end
+
+    return list
+end
+
+function refreshUpdateBranches(silent, targetKey)
+    if not httpRead then
+        if not silent then systemMessage("Branch refresh unavailable until updater is loaded.", targetKey) end
+        return false
+    end
+
+    local raw, err = httpRead(githubBranchesApiUrl())
+    if not raw then
+        state.updateBranchesStatus = "fallback"
+        if not silent then systemMessage("Branch refresh failed: " .. tostring(err) .. ". Using fallback branches.", targetKey) end
+        return false
+    end
+
+    local branches = parseGitHubBranches(raw)
+    if #branches == 0 then
+        state.updateBranchesStatus = "fallback"
+        if not silent then systemMessage("Branch refresh failed: no branches found. Using fallback branches.", targetKey) end
+        return false
+    end
+
+    state.updateBranchesRemote = branches
+    state.updateBranchesStatus = "github"
+    state.branchScroll = 0
+    if not silent then
+        local names = {}
+        for i, item in ipairs(branches) do names[i] = item.key end
+        systemMessage("GitHub branches loaded: " .. table.concat(names, ", "), targetKey)
+    end
+    return true
+end
+
+function sanitizeUpdateBranch(value)
+    value = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    value = value:gsub("^refs/heads/", "")
+    value = value:gsub("^origin/", "")
+
+    -- Keep branch names friendly for CraftOS and raw.githubusercontent.com.
+    value = value:gsub("[^%w%._%-%/]", "")
+    value = value:gsub("/+", "/")
+    value = value:gsub("^/+", ""):gsub("/+$", "")
+
+    if value == "" then return "main" end
+    return value
+end
+
+function selectedUpdateBranch()
+    local key = state.updateBranch or "main"
+    if key == "custom" then
+        return sanitizeUpdateBranch(state.updateCustomBranch or "main")
+    end
+
+    for _, item in ipairs(getUpdateBranches()) do
+        if item.key == key then
+            return sanitizeUpdateBranch(item.branch or item.key)
+        end
+    end
+
+    return sanitizeUpdateBranch(key)
+end
+
+function updateBranchLabel()
+    local key = state.updateBranch or "main"
+    if key == "custom" then
+        return "custom: " .. selectedUpdateBranch()
+    end
+    return selectedUpdateBranch()
+end
+
+function updateUrlForBranch(branch)
+    branch = sanitizeUpdateBranch(branch or selectedUpdateBranch())
+    return "https://raw.githubusercontent.com/" .. tostring(APP.updateOwner or "benchware") .. "/" .. tostring(APP.updateRepo or "Xenit-Chat") .. "/" .. branch .. "/" .. tostring(APP.updatePath or "xenitchat.lua")
+end
+
+function setUpdateBranch(key, customValue)
+    key = tostring(key or "main")
+    local exists = false
+    for _, item in ipairs(getUpdateBranches()) do
+        if item.key == key then exists = true break end
+    end
+    if not exists then key = "custom" end
+
+    state.updateBranch = key
+    if customValue and tostring(customValue) ~= "" then
+        state.updateCustomBranch = sanitizeUpdateBranch(customValue)
+    elseif key ~= "custom" then
+        state.updateCustomBranch = state.updateCustomBranch or ""
+    elseif not state.updateCustomBranch or state.updateCustomBranch == "" then
+        state.updateCustomBranch = "main"
+    end
+
+    APP.updateUrl = updateUrlForBranch(selectedUpdateBranch())
+    savePrefs()
+end
+
+function openUpdateBranchDropdown()
+    state.modal = "update_branch"
+    state.modalInput = ""
+    state.branchScroll = 0
+end
+
+function openCustomUpdateBranchModal()
+    state.modal = "update_branch_custom"
+    state.modalInput = selectedUpdateBranch()
+end
+
+function showUpdateBranchInfo()
+    systemMessage("Updater branch: " .. updateBranchLabel())
+    systemMessage("Updater URL: " .. updateUrlForBranch(selectedUpdateBranch()))
+end
+
 -- ============================================================
 -- Auto update
 -- ============================================================
@@ -2012,7 +2215,7 @@ local function getProgramPath()
     return "xenitchat.lua"
 end
 
-local function httpRead(url)
+function httpRead(url)
     if not http or not http.get then
         return nil, "HTTP API is disabled. Enable http in CraftOS-PC/CC config."
     end
@@ -2089,10 +2292,13 @@ local function checkForUpdate(auto, install, force, targetKey)
     state.updateBusy = true
 
     if not auto then
-        systemMessage("Checking GitHub for updates...", targetKey)
+        systemMessage("Checking GitHub branch " .. updateBranchLabel() .. " for updates...", targetKey)
     end
 
-    local raw, err = httpRead(APP.updateUrl)
+    local branch = selectedUpdateBranch()
+    local updateUrl = updateUrlForBranch(branch)
+    APP.updateUrl = updateUrl
+    local raw, err = httpRead(updateUrl)
     if not raw then
         if not auto then systemMessage("Update failed: " .. tostring(err), targetKey) end
         state.updateBusy = false
@@ -2111,9 +2317,9 @@ local function checkForUpdate(auto, install, force, targetKey)
     if cmp <= 0 and not force then
         if not auto then
             if cmp == 0 then
-                systemMessage("Already up to date. Local v" .. appVersion() .. ", GitHub v" .. tostring(remoteVersion) .. ".", targetKey)
+                systemMessage("Already up to date. Local v" .. appVersion() .. ", GitHub " .. updateBranchLabel() .. " v" .. tostring(remoteVersion) .. ".", targetKey)
             else
-                systemMessage("Local build is newer than GitHub. Local v" .. appVersion() .. ", GitHub v" .. tostring(remoteVersion) .. ". Use /update force to downgrade/install anyway.", targetKey)
+                systemMessage("Local build is newer than GitHub " .. updateBranchLabel() .. ". Local v" .. appVersion() .. ", remote v" .. tostring(remoteVersion) .. ". Use /update force to downgrade/install anyway.", targetKey)
             end
         end
         state.updateBusy = false
@@ -2130,7 +2336,7 @@ local function checkForUpdate(auto, install, force, targetKey)
     if install then
         installUpdate(raw, remoteVersion, targetKey)
     else
-        systemMessage("Update available: v" .. tostring(remoteVersion) .. " on GitHub. Type /update install.", targetKey)
+        systemMessage("Update available: v" .. tostring(remoteVersion) .. " on GitHub branch " .. updateBranchLabel() .. ". Type /update install.", targetKey)
     end
 
     state.updateBusy = false
@@ -3195,7 +3401,8 @@ COMMAND_HELP = {
         title = "System",
         items = {
             { cmd = "/sync", desc = "Request chat history sync.", aliases = {"/history"} },
-            { cmd = "/update", args = "[check|install|force]", desc = "Check or install GitHub update." },
+            { cmd = "/update", args = "[check|install|force|branch <name>]", desc = "Check/install GitHub update from selected branch." },
+            { cmd = "/branch", args = "[name|refresh]", desc = "Choose or refresh GitHub branches for updater." },
             { cmd = "/version", desc = "Show app/protocol version.", aliases = {"/about"} },
             { cmd = "/compat", desc = "Cycle old-client target: Generic, v15, v18, v7, v19 plain. BUGGY.", aliases = {"/legacy", "/oldclients"} },
             { cmd = "/quiet", desc = "Toggle version warning noise filter." },
@@ -3329,8 +3536,28 @@ local function handleSlashCommand(body)
             checkForUpdate(false, true, false, nil)
         elseif mode == "force" then
             checkForUpdate(false, true, true, nil)
+        elseif mode:match("^branch%s+") then
+            local br = rest:match("^%S+%s+(.+)$") or ""
+            setUpdateBranch("custom", br)
+            systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+        elseif mode == "branch refresh" or mode == "branches refresh" or mode == "refresh branches" then
+            refreshUpdateBranches(false, nil)
+            openUpdateBranchDropdown()
+        elseif mode == "branch" or mode == "branches" then
+            openUpdateBranchDropdown()
         else
             checkForUpdate(false, false, false, nil)
+        end
+    elseif command == "branch" or command == "branches" then
+        local lowerRest = rest:lower()
+        if lowerRest == "refresh" or lowerRest == "reload" or lowerRest == "scan" then
+            refreshUpdateBranches(false, nil)
+            openUpdateBranchDropdown()
+        elseif rest ~= "" then
+            setUpdateBranch("custom", rest)
+            systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+        else
+            openUpdateBranchDropdown()
         end
     elseif command == "who" or command == "online" then
         listOnlineUsers()
@@ -4661,6 +4888,8 @@ local function drawSettingsModal()
 
     addOpt("set_old", "Old-client mode: " .. legacyCompatLabel(), shouldAcceptOldClients(), openCompatDropdown, shouldAcceptOldClients() and "warn" or nil)
 
+    addOpt("set_branch", "Update branch: " .. updateBranchLabel(), false, openUpdateBranchDropdown, "accent")
+
     addOpt("set_oldtag", "Show [OLD] tags: " .. onoff(state.showOldClientTags ~= false), state.showOldClientTags ~= false, function()
         toggleBoolSetting("showOldClientTags", "Show [OLD] tags")
     end)
@@ -4926,14 +5155,93 @@ local function drawHelpModal()
 end
 
 
+
+function drawUpdateBranchModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 56, isPocket() and 16 or 18, "update_branch")
+
+    modalHeader(mx, my, mw, "Updater branch", "Choose GitHub branch for /update")
+    text(mx + 1, my + 3, trim("Current: " .. updateBranchLabel(), mw - 2), colors.black, colors.lightGray)
+    text(mx + 1, my + 4, trim("Repo: " .. tostring(APP.updateOwner or "benchware") .. "/" .. tostring(APP.updateRepo or "Xenit-Chat"), mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 5, trim("Source: " .. (state.updateBranchesStatus == "github" and "GitHub API" or "fallback") .. " | Refresh to scan", mw - 2), colors.gray, colors.lightGray)
+
+    local branches = getUpdateBranches()
+    local listTop = my + 7
+    local listBottom = my + mh - 3
+    local visibleRows = math.max(1, listBottom - listTop + 1)
+    local maxScroll = math.max(0, #branches - visibleRows)
+
+    state.branchScroll = tonumber(state.branchScroll) or 0
+    if state.branchScroll < 0 then state.branchScroll = 0 end
+    if state.branchScroll > maxScroll then state.branchScroll = maxScroll end
+
+    fill(mx + 1, listTop, mw - 2, visibleRows, colors.lightGray)
+
+    for row = 1, visibleRows do
+        local idx = state.branchScroll + row
+        local item = branches[idx]
+        if item then
+            local selected = (state.updateBranch or "main") == item.key
+            local label = (selected and "[x] " or "[ ] ") .. tostring(item.label or item.key)
+            if item.note and item.note ~= "" then label = label .. " - " .. tostring(item.note) end
+            local bgc = selected and T().accent or colors.white
+            addButton("branch_" .. item.key, mx + 1, listTop + row - 1, mw - 4, trim(label, mw - 4), colors.black, bgc, function()
+                if item.key == "custom" then
+                    openCustomUpdateBranchModal()
+                else
+                    setUpdateBranch(item.key)
+                    state.modal = "settings"
+                    systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+                end
+            end)
+        end
+    end
+
+    if #branches > visibleRows then
+        text(mx + 1, my + mh - 2, trim("Scroll: " .. tostring(state.branchScroll + 1) .. "-" .. tostring(math.min(#branches, state.branchScroll + visibleRows)) .. "/" .. tostring(#branches), mw - 12), colors.gray, colors.lightGray)
+        addButton("branch_up", mx + mw - 6, my + mh - 2, 2, "^", colors.white, colors.gray, function()
+            state.branchScroll = math.max(0, (state.branchScroll or 0) - 3)
+        end)
+        addButton("branch_down", mx + mw - 3, my + mh - 2, 2, "v", colors.white, colors.gray, function()
+            state.branchScroll = math.min(maxScroll, (state.branchScroll or 0) + 3)
+        end)
+    end
+
+    addButton("branch_info", mx + 1, my + mh - 1, 7, "Info", colors.black, colors.lightGray, showUpdateBranchInfo)
+    addButton("branch_refresh", mx + 9, my + mh - 1, 9, "Refresh", colors.black, T().accent, function()
+        refreshUpdateBranches(false)
+    end)
+    addButton("branch_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, function()
+        state.modal = "settings"
+    end)
+end
+
+function drawCustomUpdateBranchModal()
+    local mx, my, mw, mh = modalBox(isPocket() and w or 48, isPocket() and 8 or 9, "update_branch_custom")
+
+    modalHeader(mx, my, mw, "Custom branch", "Type branch name")
+    text(mx + 1, my + 3, "Branch:", colors.black, colors.lightGray)
+    fill(mx + 9, my + 3, mw - 10, 1, colors.white)
+    text(mx + 10, my + 3, trim(state.modalInput, mw - 12), colors.black, colors.white)
+    text(mx + 1, my + 5, trim("Example: main, dev, beta, feature/test", mw - 2), colors.gray, colors.lightGray)
+
+    addButton("branch_custom_save", mx + 1, my + mh - 1, 8, "Save", colors.black, T().good, function()
+        setUpdateBranch("custom", state.modalInput)
+        state.modal = "settings"
+        state.modalInput = ""
+        systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+    end)
+
+    addButton("branch_custom_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openUpdateBranchDropdown)
+end
+
 local function drawUpdateModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 10 or 11)
 
     modalHeader(mx, my, mw, "Auto Update", nil)
     text(mx + 1, my + 3, trim("Source: GitHub benchware/Xenit-Chat", mw - 2), colors.black, colors.lightGray)
-    text(mx + 1, my + 4, trim("Local version: v" .. appVersion() .. " | " .. protocolName(), mw - 2), colors.gray, colors.lightGray)
-    text(mx + 1, my + 5, trim("Startup checks install newer versions automatically.", mw - 2), colors.gray, colors.lightGray)
-    text(mx + 1, my + 6, trim("Manual: /update or /update install", mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 4, trim("Branch: " .. updateBranchLabel(), mw - 2), colors.black, colors.lightGray)
+    text(mx + 1, my + 5, trim("Local version: v" .. appVersion() .. " | " .. protocolName(), mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 6, trim("Manual: /update, /update install, /branch", mw - 2), colors.gray, colors.lightGray)
 
     local fy = my + mh - 1
     addButton("upd_check", mx + 1, fy, 9, "Check", colors.black, T().accent, function()
@@ -4945,6 +5253,8 @@ local function drawUpdateModal()
         state.modal = nil
         checkForUpdate(false, true, false, nil)
     end)
+
+    addButton("upd_branch", mx + 22, fy, 10, "Branch", colors.black, colors.lightGray, openUpdateBranchDropdown)
 
     addButton("upd_close", mx + mw - 8, fy, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
@@ -5080,6 +5390,10 @@ local function drawModal()
         drawSettingsModal()
     elseif state.modal == "compat_dropdown" then
         drawCompatDropdownModal()
+    elseif state.modal == "update_branch" then
+        drawUpdateBranchModal()
+    elseif state.modal == "update_branch_custom" then
+        drawCustomUpdateBranchModal()
     elseif state.modal == "security" then
         drawSecurityModal()
     elseif state.modal == "group_settings" then
@@ -5110,6 +5424,12 @@ local function drawModal()
         drawUpdateModal()
     elseif state.modal == "app_controls" then
         drawAppControlsModal()
+    elseif state.modal == "update_branch_custom" then
+        setUpdateBranch("custom", state.modalInput)
+        state.modal = "settings"
+        state.modalInput = ""
+        systemMessage("Update branch set to " .. updateBranchLabel() .. ".")
+
     elseif state.modal == "error" then
         drawErrorModal()
     end
@@ -5745,7 +6065,7 @@ local function typeIntoField(char)
     end
 
     if state.modal then
-        if state.modal == "create" or state.modal == "pm" or state.modal == "friend_search" or state.modal == "profile" or state.modal == "group_rename" then
+        if state.modal == "create" or state.modal == "pm" or state.modal == "friend_search" or state.modal == "profile" or state.modal == "group_rename" or state.modal == "update_branch_custom" then
             if #state.modalInput < APP.messageLimit then
                 state.modalInput = state.modalInput .. char
             end
@@ -5875,6 +6195,21 @@ local function handleKey(key)
             state.settingsScroll = (state.settingsScroll or 0) + 5
         elseif key == keys.home then
             state.settingsScroll = 0
+        end
+        return
+    end
+
+    if state.modal == "update_branch" then
+        if key == keys.up then
+            state.branchScroll = math.max(0, (state.branchScroll or 0) - 1)
+        elseif key == keys.down then
+            state.branchScroll = (state.branchScroll or 0) + 1
+        elseif key == keys.pageUp then
+            state.branchScroll = math.max(0, (state.branchScroll or 0) - 5)
+        elseif key == keys.pageDown then
+            state.branchScroll = (state.branchScroll or 0) + 5
+        elseif key == keys.home then
+            state.branchScroll = 0
         end
         return
     end
@@ -6025,6 +6360,12 @@ local function uiLoop()
                 else
                     state.compatScroll = (state.compatScroll or 0) + 3
                 end
+            elseif state.modal == "update_branch" then
+                if p1 < 0 then
+                    state.branchScroll = math.max(0, (state.branchScroll or 0) - 3)
+                else
+                    state.branchScroll = (state.branchScroll or 0) + 3
+                end
             elseif state.screen == "chat" and not state.modal then
                 if p1 < 0 then
                     scrollBy(3)
@@ -6056,6 +6397,7 @@ local function boot()
     if type(term.setCursorBlink) == "function" then term.setCursorBlink(false) end
     openModem()
     loadPrefs()
+    APP.updateUrl = updateUrlForBranch(selectedUpdateBranch())
     loadHistory()
     if state.autoCleanupAttachments ~= false then cleanupAttachments("expired", false) end
     tryRememberLogin()

@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "20.0.13",
+    version = "20.0.14",
     protocolVersion = 19,
     protocolName = "Aegis",
     protocol = "xenitchat_bus",
@@ -341,34 +341,34 @@ local sendTo = nil -- forward declaration for early history sync calls
 -- Theme / UI helpers
 -- ============================================================
 
-local function T()
+function T()
     return THEMES[state.theme] or THEMES.dark
 end
 
-local function fg(c)
+function fg(c)
     if hasColor then term.setTextColor(c) end
 end
 
-local function bg(c)
+function bg(c)
     if hasColor then term.setBackgroundColor(c) end
 end
 
-local function reset()
+function reset()
     fg(colors.white)
     bg(colors.black)
 end
 
-local function clear()
+function clear()
     reset()
     term.clear()
     term.setCursorPos(1, 1)
 end
 
-local function safeWrite(v)
+function safeWrite(v)
     write(tostring(v or ""))
 end
 
-local function fill(x, y, width, height, color)
+function fill(x, y, width, height, color)
     if width <= 0 or height <= 0 then return end
 
     bg(color)
@@ -388,7 +388,7 @@ local function fill(x, y, width, height, color)
     reset()
 end
 
-local function text(x, y, value, color, background)
+function text(x, y, value, color, background)
     if y < 1 or y > h or x < 1 or x > w then return end
 
     local s = tostring(value or "")
@@ -406,13 +406,13 @@ local function text(x, y, value, color, background)
     reset()
 end
 
-local function center(y, value, color, background)
+function center(y, value, color, background)
     local s = tostring(value or "")
     local x = math.floor((w - #s) / 2) + 1
     text(math.max(1, x), y, s, color, background)
 end
 
-local function trim(value, maxLen)
+function trim(value, maxLen)
     local s = tostring(value or "")
 
     if maxLen <= 0 then return "" end
@@ -425,39 +425,39 @@ local function trim(value, maxLen)
     return s
 end
 
-local function isTiny()
+function isTiny()
     return w < 28 or h < 13
 end
 
-local function isPocket()
+function isPocket()
     return w < 50 or h < 18
 end
 
-local function isSmall()
+function isSmall()
     return w < 58 or h < 18
 end
 
-local function hasSidebar()
+function hasSidebar()
     return w >= 58 and h >= 16
 end
 
-local function leftWidth()
+function leftWidth()
     if not hasSidebar() then return 0 end
     if w < 72 then return 18 end
     if w < 92 then return 22 end
     return math.min(28, math.floor(w * 0.26))
 end
 
-local function inputRows()
+function inputRows()
     if h <= 13 then return 1 end
     return 2
 end
 
-local function bottomChromeRows()
+function bottomChromeRows()
     return inputRows() + 2
 end
 
-local function messageArea()
+function messageArea()
     local lw = leftWidth()
     local top = lw == 0 and 3 or 2
     local bottom = h - bottomChromeRows() - 1
@@ -471,12 +471,12 @@ local function messageArea()
     return lw + 1, top, w - lw, bottom, math.max(1, bottom - top + 1)
 end
 
-local function clearClickable()
+function clearClickable()
     state.buttons = {}
     state.convoClicks = {}
 end
 
-local function addButton(id, x, y, width, label, color, background, action)
+function addButton(id, x, y, width, label, color, background, action)
     if y < 1 or y > h then return end
 
     x = math.floor(tonumber(x) or 1)
@@ -514,7 +514,7 @@ local function addButton(id, x, y, width, label, color, background, action)
     reset()
 end
 
-local function clickButton(x, y)
+function clickButton(x, y)
     for _, b in pairs(state.buttons) do
         if x >= b.x and x <= b.x + b.w - 1 and y >= b.y and y <= b.y + b.h - 1 then
             if b.action then b.action() end
@@ -529,7 +529,7 @@ end
 -- File helpers
 -- ============================================================
 
-local function readSerialized(path, fallback)
+function readSerialized(path, fallback)
     if not fs.exists(path) then return fallback end
 
     local f = fs.open(path, "r")
@@ -547,13 +547,13 @@ local function readSerialized(path, fallback)
     return fallback
 end
 
-local function writeSerialized(path, data)
+function writeSerialized(path, data)
     local f = fs.open(path, "w")
     f.write(textutils.serialize(data))
     f.close()
 end
 
-local function readText(path)
+function readText(path)
     if not fs.exists(path) then return nil end
 
     local f = fs.open(path, "r")
@@ -565,7 +565,7 @@ local function readText(path)
     return raw
 end
 
-local function writeText(path, data)
+function writeText(path, data)
     local f = fs.open(path, "w")
     f.write(tostring(data or ""))
     f.close()
@@ -575,7 +575,7 @@ end
 -- Hash / identity
 -- ============================================================
 
-local function seedRandom()
+function seedRandom()
     local seed = os.time() + os.getComputerID() * 31337
 
     if os.epoch then
@@ -592,7 +592,7 @@ end
 
 seedRandom()
 
-local function randomToken(length)
+function randomToken(length)
     local chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     local out = {}
 
@@ -604,7 +604,7 @@ local function randomToken(length)
     return table.concat(out)
 end
 
-local function baseHash(input)
+function baseHash(input)
     input = tostring(input or "")
 
     local h1 = 5381
@@ -622,7 +622,7 @@ local function baseHash(input)
     return tostring(h1) .. "-" .. tostring(h2) .. "-" .. tostring(h3)
 end
 
-local function slowHash(input, rounds)
+function slowHash(input, rounds)
     local value = tostring(input or "")
 
     for i = 1, rounds do
@@ -632,22 +632,22 @@ local function slowHash(input, rounds)
     return value
 end
 
-local function shortId(id)
+function shortId(id)
     id = tostring(id or ""):gsub("%-", "")
 
     if #id <= 6 then return id end
     return id:sub(1, 6)
 end
 
-local function appVersion()
+function appVersion()
     return tostring(APP.version or APP.protocolVersion or "0")
 end
 
-local function protocolName()
+function protocolName()
     return tostring(APP.protocolName or "Unknown")
 end
 
-local function protocolVersion()
+function protocolVersion()
     return tonumber(APP.protocolVersion or APP.version) or 0
 end
 
@@ -657,7 +657,7 @@ function onoff(value)
     return value and "ON" or "OFF"
 end
 
-local function parseVersionParts(value)
+function parseVersionParts(value)
     local parts = {}
     value = tostring(value or "0")
 
@@ -669,7 +669,7 @@ local function parseVersionParts(value)
     return parts
 end
 
-local function compareVersions(a, b)
+function compareVersions(a, b)
     local aa = parseVersionParts(a)
     local bb = parseVersionParts(b)
     local max = math.max(#aa, #bb)
@@ -685,7 +685,7 @@ local function compareVersions(a, b)
     return 0
 end
 
-local function sameProtocolVersion(value)
+function sameProtocolVersion(value)
     return tonumber(value) == protocolVersion()
 end
 
@@ -768,7 +768,7 @@ function remoteIsOld(publicIdOrUser)
     return false
 end
 
-local function getNodeSecret()
+function getNodeSecret()
     local existing = readText(APP.nodeSecretFile)
 
     if existing and #existing >= 24 then
@@ -780,15 +780,15 @@ local function getNodeSecret()
     return secret
 end
 
-local function getPublicId(nodeSecret)
+function getPublicId(nodeSecret)
     return slowHash("PUB|" .. tostring(os.getComputerID()) .. "|" .. tostring(nodeSecret), APP.publicRounds)
 end
 
-local function passwordHash(password, salt)
+function passwordHash(password, salt)
     return slowHash("PASS|" .. tostring(salt) .. "|" .. tostring(password), APP.passRounds)
 end
 
-local function accountIntegrity(username, account, nodeSecret)
+function accountIntegrity(username, account, nodeSecret)
     local raw =
         "ACC|" ..
         tostring(username) .. "|" ..
@@ -803,15 +803,15 @@ local function accountIntegrity(username, account, nodeSecret)
     return slowHash(raw, APP.integrityRounds)
 end
 
-local function loadAccounts()
+function loadAccounts()
     return readSerialized(APP.accountFile, {})
 end
 
-local function saveAccounts(accounts)
+function saveAccounts(accounts)
     writeSerialized(APP.accountFile, accounts)
 end
 
-local function buildAccount(username, password)
+function buildAccount(username, password)
     local nodeSecret = getNodeSecret()
     local salt = randomToken(32)
     local publicId = getPublicId(nodeSecret)
@@ -829,7 +829,7 @@ local function buildAccount(username, password)
     return account
 end
 
-local function verifyAccount(username, account)
+function verifyAccount(username, account)
     if type(account) ~= "table" then
         return false, "Account record missing."
     end
@@ -862,7 +862,7 @@ end
 -- Preferences
 -- ============================================================
 
-local function defaultPrefs()
+function defaultPrefs()
     return {
         remember = true,
         username = nil,
@@ -931,7 +931,7 @@ local function defaultPrefs()
     }
 end
 
-local function savePrefs()
+function savePrefs()
     local existingPrefs = readSerialized(APP.prefsFile, {})
     local rememberedUsername = nil
 
@@ -1000,7 +1000,7 @@ local function savePrefs()
     writeSerialized(APP.prefsFile, data)
 end
 
-local function loadPrefs()
+function loadPrefs()
     local data = readSerialized(APP.prefsFile, defaultPrefs())
 
     if type(data) ~= "table" then data = defaultPrefs() end
@@ -1128,7 +1128,7 @@ end
 -- Messages / conversations
 -- ============================================================
 
-local function clampMessage(value)
+function clampMessage(value)
     value = tostring(value or "")
 
     if #value > APP.messageLimit then
@@ -1138,7 +1138,7 @@ local function clampMessage(value)
     return value
 end
 
-local function splitFixed(value, width)
+function splitFixed(value, width)
     local s = tostring(value or "")
     local lines = {}
 
@@ -1154,7 +1154,7 @@ local function splitFixed(value, width)
     return lines
 end
 
-local function getInputLines()
+function getInputLines()
     local raw = "> " .. tostring(state.input or "")
     local width = math.max(1, w - leftWidth())
     local lines = splitFixed(raw, width)
@@ -1171,14 +1171,14 @@ local function getInputLines()
     return visible
 end
 
-local function touchConvo(key)
+function touchConvo(key)
     if state.convos[key] then
         seq = seq + 1
         state.convos[key].last = seq
     end
 end
 
-local function ensureConvo(key, title, kind, private, listed, owner, peerId)
+function ensureConvo(key, title, kind, private, listed, owner, peerId)
     if not key or key == "" then return end
 
     if not state.convos[key] then
@@ -1216,7 +1216,7 @@ end
 
 local saveHistory
 
-local function messageIdentity(key, from, body, kind, meta)
+function messageIdentity(key, from, body, kind, meta)
     meta = meta or {}
 
     if meta.msgId and meta.msgId ~= "" then
@@ -1226,17 +1226,17 @@ local function messageIdentity(key, from, body, kind, meta)
     return slowHash("MSG|" .. tostring(key) .. "|" .. tostring(from) .. "|" .. tostring(body) .. "|" .. tostring(kind) .. "|" .. tostring(meta.fromId or "") .. "|" .. tostring(meta.time or ""), 8)
 end
 
-local function rememberMessage(key, msgId)
+function rememberMessage(key, msgId)
     if not key or not msgId then return end
     state.messageSeen[key] = state.messageSeen[key] or {}
     state.messageSeen[key][msgId] = true
 end
 
-local function hasMessage(key, msgId)
+function hasMessage(key, msgId)
     return key and msgId and state.messageSeen[key] and state.messageSeen[key][msgId]
 end
 
-local function rebuildMessageSeen()
+function rebuildMessageSeen()
     state.messageSeen = {}
 
     for key, list in pairs(state.messages or {}) do
@@ -1252,7 +1252,7 @@ local function rebuildMessageSeen()
     end
 end
 
-local function addMessage(key, from, body, kind, meta)
+function addMessage(key, from, body, kind, meta)
     key = key or "global"
 
     if not state.convos[key] then
@@ -1305,7 +1305,7 @@ local function addMessage(key, from, body, kind, meta)
     return true
 end
 
-local function ensureSystemChannel()
+function ensureSystemChannel()
     ensureConvo("system", "system", "system", true, false, "local")
     if state.convos.system then
         state.convos.system.localOnly = true
@@ -1314,7 +1314,7 @@ local function ensureSystemChannel()
     end
 end
 
-local function commandOutputKey(key)
+function commandOutputKey(key)
     if key then
         if key == "system" and state._slashCommandActive and state.useSystemSlashChannel ~= false then
             ensureSystemChannel()
@@ -1335,11 +1335,11 @@ local function commandOutputKey(key)
     return state.current
 end
 
-local function systemMessage(body, key)
+function systemMessage(body, key)
     addMessage(commandOutputKey(key), "system", body, "system")
 end
 
-local function isHistorySyncable(key, publicId)
+function isHistorySyncable(key, publicId)
     local c = state.convos[key]
     if not c then return false end
 
@@ -1395,7 +1395,7 @@ saveHistory = function()
     writeSerialized(APP.historyFile, data)
 end
 
-local function loadHistory()
+function loadHistory()
     local data = readSerialized(APP.historyFile, nil)
 
     if type(data) ~= "table" or type(data.messages) ~= "table" then
@@ -1442,7 +1442,7 @@ local function loadHistory()
     rebuildMessageSeen()
 end
 
-local function historyKeysForPeer(publicId)
+function historyKeysForPeer(publicId)
     local keys = {}
 
     for key, _ in pairs(state.convos or {}) do
@@ -1454,7 +1454,7 @@ local function historyKeysForPeer(publicId)
     return keys
 end
 
-local function makeHistoryBundle(keys, requesterPublicId)
+function makeHistoryBundle(keys, requesterPublicId)
     local bundles = {}
 
     for _, key in ipairs(keys or {}) do
@@ -1499,7 +1499,7 @@ local function makeHistoryBundle(keys, requesterPublicId)
     return bundles
 end
 
-local function importHistoryBundles(bundles, senderPublicId)
+function importHistoryBundles(bundles, senderPublicId)
     local imported = 0
 
     if type(bundles) ~= "table" then return 0 end
@@ -1544,7 +1544,7 @@ local function importHistoryBundles(bundles, senderPublicId)
     return imported
 end
 
-local function requestHistorySync(senderId, publicId)
+function requestHistorySync(senderId, publicId)
     if not senderId or not publicId then return end
     if shouldShareHistoryWith and not shouldShareHistoryWith(publicId) then return end
 
@@ -1560,7 +1560,7 @@ local function requestHistorySync(senderId, publicId)
     })
 end
 
-local function switchConvo(key)
+function switchConvo(key)
     ensureConvo(key, key, "public", false, true, "unknown")
     state.current = key
     state.scroll = 0
@@ -1572,7 +1572,7 @@ local function switchConvo(key)
     savePrefs()
 end
 
-local function getConvoList()
+function getConvoList()
     local list = {}
 
     for key, c in pairs(state.convos) do
@@ -1601,7 +1601,7 @@ local function getConvoList()
     return list
 end
 
-local function nextConvo()
+function nextConvo()
     local list = getConvoList()
 
     if #list == 0 then return end
@@ -1616,7 +1616,7 @@ local function nextConvo()
     switchConvo(list[1].key)
 end
 
-local function wrapText(prefix, body, width, color)
+function wrapText(prefix, body, width, color)
     local lines = {}
     local p = tostring(prefix or "")
     local b = tostring(body or "")
@@ -1692,7 +1692,7 @@ local function wrapText(prefix, body, width, color)
     return lines
 end
 
-local function buildVisualLines(key, width)
+function buildVisualLines(key, width)
     local visual = {}
     local list = state.messages[key] or {}
 
@@ -1744,14 +1744,14 @@ local function buildVisualLines(key, width)
     return visual
 end
 
-local function maxScroll()
+function maxScroll()
     local _, _, _, _, areaH = messageArea()
     local _, _, cw = messageArea()
     local visual = buildVisualLines(state.current, cw)
     return math.max(0, #visual - areaH)
 end
 
-local function clampScroll()
+function clampScroll()
     local max = maxScroll()
 
     if state.scroll < 0 then
@@ -1761,7 +1761,7 @@ local function clampScroll()
     end
 end
 
-local function scrollBy(delta)
+function scrollBy(delta)
     state.scroll = state.scroll + delta
     clampScroll()
 end
@@ -1770,7 +1770,7 @@ end
 -- Users / friends / block
 -- ============================================================
 
-local function displayName(username, publicId, profile)
+function displayName(username, publicId, profile)
     local base = username or "unknown"
 
     if profile and profile.display and profile.display ~= "" then
@@ -1796,7 +1796,7 @@ local function displayName(username, publicId, profile)
     return base
 end
 
-local function onlineCount()
+function onlineCount()
     local now = os.clock()
     local count = 0
 
@@ -1809,7 +1809,7 @@ local function onlineCount()
     return count
 end
 
-local function pendingFriendCount()
+function pendingFriendCount()
     local count = 0
 
     if state.friendRequests and state.friendRequests.inbox then
@@ -1821,7 +1821,7 @@ local function pendingFriendCount()
     return count
 end
 
-local function totalUnread()
+function totalUnread()
     local count = 0
 
     for _, c in pairs(state.convos or {}) do
@@ -1831,7 +1831,7 @@ local function totalUnread()
     return count
 end
 
-local function peerDisplayName(publicId, fallback)
+function peerDisplayName(publicId, fallback)
     local user = state.users[publicId]
     local friend = state.friends[publicId]
     local reqIn = state.friendRequests and state.friendRequests.inbox and state.friendRequests.inbox[publicId]
@@ -1841,7 +1841,7 @@ local function peerDisplayName(publicId, fallback)
     return displayName(info.username or fallback or "unknown", publicId, info.profile or {})
 end
 
-local function chatLabel(c, compact)
+function chatLabel(c, compact)
     if not c then return "#global" end
 
     local pin = (state.pinned and state.pinned[c.key]) and "^ " or ""
@@ -1856,11 +1856,11 @@ local function chatLabel(c, compact)
     return pin .. "#" .. tostring(c.title or c.key)
 end
 
-local function currentChatTitle()
+function currentChatTitle()
     return chatLabel(state.convos[state.current], true)
 end
 
-local function cleanGroupTitle(value)
+function cleanGroupTitle(value)
     local s = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
     s = s:gsub("%s+", " ")
     s = s:gsub("[\n\r\t]", " ")
@@ -1869,31 +1869,31 @@ local function cleanGroupTitle(value)
     return s
 end
 
-local function canManageGroup(c)
+function canManageGroup(c)
     return c and c.type ~= "pm" and c.key ~= "global"
 end
 
-local function relationMark(publicId)
+function relationMark(publicId)
     if state.friends[publicId] then return "*" end
     if state.friendRequests and state.friendRequests.inbox and state.friendRequests.inbox[publicId] then return "!" end
     if state.friendRequests and state.friendRequests.sent and state.friendRequests.sent[publicId] then return "?" end
     return " "
 end
 
-local function openMainMenu()
+function openMainMenu()
     state.modal = "main_menu"
     state.modalInput = ""
     state.modalData = nil
     state.menuScroll = tonumber(state.menuScroll) or 0
 end
 
-local function openChatsModal()
+function openChatsModal()
     state.modal = "chats"
     state.modalInput = ""
     state.modalData = nil
 end
 
-local function clearCurrentChat()
+function clearCurrentChat()
     if state.current and state.messages[state.current] then
         state.messages[state.current] = {}
         if state.messageSeen then state.messageSeen[state.current] = {} end
@@ -1902,7 +1902,7 @@ local function clearCurrentChat()
     end
 end
 
-local function clearSystemChannel(showNotice)
+function clearSystemChannel(showNotice)
     ensureSystemChannel()
     state.messages.system = {}
     if state.messageSeen then state.messageSeen.system = {} end
@@ -1917,7 +1917,7 @@ local function clearSystemChannel(showNotice)
     end
 end
 
-local function getSortedUsers()
+function getSortedUsers()
     local now = os.clock()
     local list = {}
 
@@ -1949,7 +1949,7 @@ local function getSortedUsers()
     return list
 end
 
-local function resolveUser(value)
+function resolveUser(value)
     value = tostring(value or ""):gsub("^@", ""):gsub("^#", "")
 
     if value == "" then return nil end
@@ -1979,7 +1979,7 @@ local function resolveUser(value)
     return bestId, bestUser
 end
 
-local function pmKeyFor(publicId, name)
+function pmKeyFor(publicId, name)
     if publicId and publicId ~= "" then
         return "PM:" .. shortId(publicId)
     end
@@ -1991,7 +1991,7 @@ end
 -- Network
 -- ============================================================
 
-local function openModem()
+function openModem()
     local found = false
 
     peripheral.find("modem", function(name)
@@ -2012,7 +2012,7 @@ local function openModem()
     end
 end
 
-local function myName()
+function myName()
     if state.profile.display and state.profile.display ~= "" then
         return state.profile.display
     end
@@ -2020,7 +2020,7 @@ local function myName()
     return state.username or "guest"
 end
 
-local function makePacket(kind, data, legacyVersion, plainLegacy)
+function makePacket(kind, data, legacyVersion, plainLegacy)
     data = data or {}
 
     data.app = APP.name
@@ -2065,7 +2065,7 @@ function makeLegacyPacket(kind, data)
     return packet
 end
 
-local function broadcast(kind, data)
+function broadcast(kind, data)
     if not state.username or not state.publicId then return end
     rednet.broadcast(makePacket(kind, data), APP.protocol)
     if shouldMirrorForLegacy(kind) then
@@ -2348,7 +2348,7 @@ end
 -- Auto update
 -- ============================================================
 
-local function getProgramPath()
+function getProgramPath()
     if shell and shell.getRunningProgram then
         local ok, path = pcall(shell.getRunningProgram)
         if ok and path and path ~= "" then return path end
@@ -2377,7 +2377,7 @@ function httpRead(url)
     return raw, nil
 end
 
-local function parseRemoteVersion(raw)
+function parseRemoteVersion(raw)
     if type(raw) ~= "string" then return nil end
 
     -- IMPORTANT: Lua returns only the first capture when assigned to one variable.
@@ -2391,7 +2391,7 @@ local function parseRemoteVersion(raw)
     return nil
 end
 
-local function validateUpdate(raw)
+function validateUpdate(raw)
     if type(raw) ~= "string" then return false, "Bad download." end
     if not raw:find("XenitChat", 1, true) then return false, "Remote file is not XenitChat." end
     if not raw:find("local APP%s*=") then return false, "Remote file has no APP block." end
@@ -2408,7 +2408,7 @@ local function validateUpdate(raw)
     return true, nil
 end
 
-local function installUpdate(raw, remoteVersion, targetKey)
+function installUpdate(raw, remoteVersion, targetKey)
     local path = getProgramPath()
     local backup = path .. ".bak"
     targetKey = targetKey or "system"
@@ -2470,7 +2470,7 @@ function scanUpdateBranches(targetKey, includeMessages)
     return newestBranch, newestVersion, scanned
 end
 
-local function checkForUpdate(auto, install, force, targetKey)
+function checkForUpdate(auto, install, force, targetKey)
     targetKey = targetKey or "system"
     if targetKey == "system" then ensureSystemChannel() end
 
@@ -2539,7 +2539,7 @@ local function checkForUpdate(auto, install, force, targetKey)
     state.updateBusy = false
 end
 
-local function openUpdateModal()
+function openUpdateModal()
     state.modal = "update"
     state.modalInput = ""
     state.modalData = nil
@@ -2556,7 +2556,7 @@ end
 
 local setError
 
-local function requestDiscovery()
+function requestDiscovery()
     state.discover = {}
 
     for key, c in pairs(state.convos) do
@@ -2577,7 +2577,7 @@ local function requestDiscovery()
     })
 end
 
-local function createGroup(name, mode)
+function createGroup(name, mode)
     if not name or name == "" then return end
 
     local title = cleanGroupTitle(name)
@@ -2602,7 +2602,7 @@ local function createGroup(name, mode)
     })
 end
 
-local function joinGroup(name)
+function joinGroup(name)
     if not name or name == "" then return end
 
     local title = cleanGroupTitle(name)
@@ -2618,7 +2618,7 @@ local function joinGroup(name)
     })
 end
 
-local function renameGroupLocal(key, newTitle, byName)
+function renameGroupLocal(key, newTitle, byName)
     local c = state.convos[key]
     if not canManageGroup(c) then return false end
 
@@ -2637,7 +2637,7 @@ local function renameGroupLocal(key, newTitle, byName)
     return true
 end
 
-local function renameCurrentGroup(newTitle)
+function renameCurrentGroup(newTitle)
     local c = state.convos[state.current]
 
     if not canManageGroup(c) then
@@ -2655,7 +2655,7 @@ local function renameCurrentGroup(newTitle)
     end
 end
 
-local function leaveCurrentGroup()
+function leaveCurrentGroup()
     local c = state.convos[state.current]
 
     if not canManageGroup(c) then
@@ -2679,13 +2679,13 @@ local function leaveCurrentGroup()
     systemMessage("Left group #" .. title .. ".", "global")
 end
 
-local function openGroupSettings()
+function openGroupSettings()
     state.modal = "group_settings"
     state.modalInput = ""
     state.modalData = nil
 end
 
-local function openRenameGroup()
+function openRenameGroup()
     local c = state.convos[state.current]
     if not canManageGroup(c) then
         setError("Open a group first. Global and DMs cannot be renamed.")
@@ -2697,7 +2697,7 @@ local function openRenameGroup()
     state.modalData = nil
 end
 
-local function sendReadReceipt(publicId)
+function sendReadReceipt(publicId)
     if not publicId then return end
 
     broadcast("read", {
@@ -2705,7 +2705,7 @@ local function sendReadReceipt(publicId)
     })
 end
 
-local function openPM(publicId, user)
+function openPM(publicId, user)
     if not user and publicId then
         user = state.users[publicId]
     end
@@ -2724,7 +2724,7 @@ local logout
 local shutdownApp
 local openAppControls
 
-local function markAllRead()
+function markAllRead()
     for _, c in pairs(state.convos or {}) do
         c.unread = 0
     end
@@ -2732,7 +2732,7 @@ local function markAllRead()
     systemMessage("Marked all chats as read.")
 end
 
-local function togglePinCurrent()
+function togglePinCurrent()
     local c = state.convos[state.current]
     if not c then return end
     if c.key == "global" then
@@ -2745,7 +2745,7 @@ local function togglePinCurrent()
     systemMessage((state.pinned[c.key] and "Pinned " or "Unpinned ") .. chatLabel(c, true) .. ".")
 end
 
-local function listOnlineUsers()
+function listOnlineUsers()
     local list = getSortedUsers()
     if #list == 0 then
         systemMessage("No online users found.", "system")
@@ -2765,7 +2765,7 @@ local function listOnlineUsers()
     systemMessage("Online: " .. table.concat(names, ", "), "system")
 end
 
-local function resolveBlocked(value)
+function resolveBlocked(value)
     value = tostring(value or ""):gsub("^@", ""):gsub("^#", "")
     if value == "" then return nil end
 
@@ -2780,17 +2780,17 @@ local function resolveBlocked(value)
     return nil
 end
 
-local function showMyId()
+function showMyId()
     systemMessage("Your ID: " .. shortId(state.publicId) .. "  | Protocol " .. protocolName() .. "/" .. tostring(protocolVersion()), "system")
 end
 
-local function toggleQuietVersionWarnings()
+function toggleQuietVersionWarnings()
     state.quietVersionWarnings = not state.quietVersionWarnings
     savePrefs()
     systemMessage("Version warning noise filter: " .. (state.quietVersionWarnings and "ON" or "OFF") .. ".")
 end
 
-local function toggleOldClientCompat()
+function toggleOldClientCompat()
     state.allowOldClients = not state.allowOldClients
     if state.allowOldClients and (state.legacyCompatMode == "off" or not state.legacyCompatMode) then
         state.legacyCompatMode = "accept"
@@ -2818,7 +2818,7 @@ function openCompatDropdown()
     state.compatScroll = 0
 end
 
-local function showVersionInfo()
+function showVersionInfo()
     systemMessage("XenitChat v" .. appVersion() .. " | Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()) .. " | old-client mode: " .. legacyCompatLabel(), "system")
 end
 
@@ -2927,7 +2927,7 @@ function toggleBoolSetting(field, label)
     systemMessage(label .. ": " .. (state[field] and "ON" or "OFF") .. ".")
 end
 
-local function openSettingsModal()
+function openSettingsModal()
     state.modal = "settings"
     state.modalInput = ""
     state.modalData = nil
@@ -3710,7 +3710,7 @@ function isSystemSlashCommand(command)
     return systemCommands[command] == true
 end
 
-local function handleSlashCommand(body)
+function handleSlashCommand(body)
     if body:sub(1, 1) ~= "/" then return false end
 
     local command, rest = body:match("^/(%S+)%s*(.*)$")
@@ -3939,7 +3939,7 @@ local function handleSlashCommand(body)
     return true
 end
 
-local function sendChat()
+function sendChat()
     local body = clampMessage(state.input)
 
     if body == "" then return end
@@ -3978,7 +3978,7 @@ local function sendChat()
     state.input = ""
 end
 
-local function cleanRequests(publicId)
+function cleanRequests(publicId)
     if not publicId then return end
 
     if state.friendRequests then
@@ -3987,7 +3987,7 @@ local function cleanRequests(publicId)
     end
 end
 
-local function requestRecord(publicId, user, status)
+function requestRecord(publicId, user, status)
     user = user or state.users[publicId] or {}
 
     return {
@@ -3998,7 +3998,7 @@ local function requestRecord(publicId, user, status)
     }
 end
 
-local function addFriendDirect(publicId, user)
+function addFriendDirect(publicId, user)
     if not publicId then return end
 
     user = user or state.users[publicId] or {}
@@ -4041,7 +4041,7 @@ function sendFriendRequest(publicId, user)
     systemMessage("Friend request sent to " .. displayName(user.username, publicId, user.profile) .. ".")
 end
 
-local function acceptFriendRequest(publicId, user)
+function acceptFriendRequest(publicId, user)
     if not publicId then return end
 
     addFriendDirect(publicId, user)
@@ -4053,7 +4053,7 @@ local function acceptFriendRequest(publicId, user)
     systemMessage("Friend request accepted.")
 end
 
-local function declineFriendRequest(publicId)
+function declineFriendRequest(publicId)
     if not publicId then return end
 
     cleanRequests(publicId)
@@ -4066,7 +4066,7 @@ local function declineFriendRequest(publicId)
     systemMessage("Friend request declined.")
 end
 
-local function cancelFriendRequest(publicId)
+function cancelFriendRequest(publicId)
     if not publicId then return end
 
     if state.friendRequests and state.friendRequests.sent then
@@ -4082,7 +4082,7 @@ local function cancelFriendRequest(publicId)
     systemMessage("Friend request cancelled.")
 end
 
-local function unfriendUser(publicId)
+function unfriendUser(publicId)
     if not publicId then return end
 
     state.friends[publicId] = nil
@@ -4118,7 +4118,7 @@ function setError(message)
     state.modalInput = tostring(message or "Error")
 end
 
-local function finishLogin(username, account, remembered)
+function finishLogin(username, account, remembered)
     state.username = username
     state.publicId = account.publicId
 
@@ -4145,7 +4145,7 @@ local function finishLogin(username, account, remembered)
     end
 end
 
-local function login()
+function login()
     local accounts = loadAccounts()
     local username = state.input
     local password = state.password
@@ -4177,7 +4177,7 @@ local function login()
     finishLogin(username, account, false)
 end
 
-local function register()
+function register()
     local accounts = loadAccounts()
     local username = state.input
     local password = state.password
@@ -4211,7 +4211,7 @@ local function register()
     finishLogin(username, account, false)
 end
 
-local function tryRememberLogin()
+function tryRememberLogin()
     if not state.remember then return false end
 
     local prefs = readSerialized(APP.prefsFile, {})
@@ -4310,7 +4310,7 @@ local renderBuffer = {
     height = 0
 }
 
-local function beginBufferedDraw()
+function beginBufferedDraw()
     if type(window) ~= "table" or type(window.create) ~= "function" then
         return nil, nil
     end
@@ -4337,7 +4337,7 @@ local function beginBufferedDraw()
     return parent, renderBuffer.win
 end
 
-local function endBufferedDraw(parent, win)
+function endBufferedDraw(parent, win)
     if parent then
         term.redirect(parent)
     end
@@ -4351,7 +4351,7 @@ end
 -- Draw login
 -- ============================================================
 
-local function drawLogin(registerMode)
+function drawLogin(registerMode)
     clearClickable()
     clear()
 
@@ -4447,13 +4447,13 @@ end
 -- ============================================================
 
 
-local function closeModal()
+function closeModal()
     state.modal = nil
     state.modalInput = ""
     state.modalData = nil
 end
 
-local function modalHeader(mx, my, mw, title, subtitle, closeAction)
+function modalHeader(mx, my, mw, title, subtitle, closeAction)
     local th = T()
     fill(mx, my, mw, 1, th.top or th.accent)
     text(mx + 1, my, trim(title or "", math.max(1, mw - 6)), colors.white, th.top or th.accent)
@@ -4467,13 +4467,13 @@ local function modalHeader(mx, my, mw, title, subtitle, closeAction)
     end
 end
 
-local function modalDivider(mx, y, mw)
+function modalDivider(mx, y, mw)
     if y >= 1 and y <= h then
         fill(mx + 1, y, math.max(0, mw - 2), 1, colors.gray)
     end
 end
 
-local function modalBox(width, height, modalKey)
+function modalBox(width, height, modalKey)
     modalKey = modalKey or state.modal or "modal"
     local marginX = w <= 30 and 0 or 2
     local marginY = h <= 14 and 0 or 1
@@ -4514,7 +4514,7 @@ local function modalBox(width, height, modalKey)
     return mx, my, mw, mh
 end
 
-local function drawCreateModal()
+function drawCreateModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 44, isPocket() and 11 or 9)
 
     modalHeader(mx, my, mw, "New group", nil)
@@ -4577,7 +4577,7 @@ local function drawCreateModal()
     end)
 end
 
-local function drawDiscoverModal()
+function drawDiscoverModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 11 or 13)
 
     modalHeader(mx, my, mw, "Discover", "Public groups on the network")
@@ -4641,7 +4641,7 @@ local function drawDiscoverModal()
     end)
 end
 
-local function drawPMModal()
+function drawPMModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 44, isPocket() and 7 or 8)
 
     modalHeader(mx, my, mw, "Direct message", nil)
@@ -4669,7 +4669,7 @@ local function drawPMModal()
     end)
 end
 
-local function drawPeopleModal()
+function drawPeopleModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 11 or 13)
 
     modalHeader(mx, my, mw, "People & Friends", "online | friends first | click a user")
@@ -4728,7 +4728,7 @@ local function drawPeopleModal()
 end
 
 
-local function drawFriendInboxModal()
+function drawFriendInboxModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 52, isPocket() and 12 or 14)
 
     modalHeader(mx, my, mw, "Friend inbox", "! incoming  |  ? sent")
@@ -4781,7 +4781,7 @@ local function drawFriendInboxModal()
     end)
 end
 
-local function drawBlockedModal()
+function drawBlockedModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 52, isPocket() and 12 or 14)
 
     modalHeader(mx, my, mw, "Blocked users", "Click a user to unblock")
@@ -4822,7 +4822,7 @@ local function drawBlockedModal()
     end)
 end
 
-local function drawFriendSearchModal()
+function drawFriendSearchModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 44, 7)
 
     modalHeader(mx, my, mw, "Add friend", nil)
@@ -4848,7 +4848,7 @@ local function drawFriendSearchModal()
     end)
 end
 
-local function drawUserInfoModal()
+function drawUserInfoModal()
     local data = state.modalData or {}
     local id = data.publicId
     local user = data.user or state.users[id] or {}
@@ -4929,7 +4929,7 @@ local function drawUserInfoModal()
     end)
 end
 
-local function drawProfileModal()
+function drawProfileModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 46, isPocket() and 8 or 9)
 
     local title = state.modalMode == "status" and "Set status" or "Set display name"
@@ -4972,7 +4972,7 @@ end
 
 
 
-local function drawCompatDropdownModal()
+function drawCompatDropdownModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 62, isPocket() and 18 or 20, "compat_dropdown")
 
     modalHeader(mx, my, mw, "Old-client compatibility", "Choose target. All mirror modes are BUGGY.")
@@ -5022,7 +5022,7 @@ local function drawCompatDropdownModal()
     end)
 end
 
-local function drawSettingsModal()
+function drawSettingsModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 66, isPocket() and 22 or 24)
 
     modalHeader(mx, my, mw, "Settings", "Scroll options  |  drag header  |  Protocol " .. protocolName() .. " #" .. tostring(protocolVersion()))
@@ -5194,7 +5194,7 @@ local function drawSettingsModal()
     addButton("settings_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
 
-local function drawGroupSettingsModal()
+function drawGroupSettingsModal()
     local c = state.convos[state.current]
     local isGroup = canManageGroup(c)
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 12 or 13)
@@ -5233,7 +5233,7 @@ local function drawGroupSettingsModal()
     addButton("grp_back", mx + mw - 8, by, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
 
-local function drawGroupRenameModal()
+function drawGroupRenameModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 46, isPocket() and 8 or 8)
 
     modalHeader(mx, my, mw, "Rename group", nil)
@@ -5251,7 +5251,7 @@ local function drawGroupRenameModal()
     addButton("rename_cancel", mx + mw - 8, my + mh - 1, 8, "Cancel", colors.white, colors.gray, openGroupSettings)
 end
 
-local function drawMainMenuModal()
+function drawMainMenuModal()
     local desiredW = isPocket() and w or 68
     local desiredH = isPocket() and 18 or 22
     local mx, my, mw, mh = modalBox(desiredW, desiredH, "main_menu")
@@ -5335,7 +5335,7 @@ local function drawMainMenuModal()
     addButton("menu_close", mx + 3 + bw1 + bw2, fy, bw3, "Close", colors.white, colors.gray, closeModal)
 end
 
-local function drawChatsModal()
+function drawChatsModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 50, isPocket() and 13 or 14)
 
     modalHeader(mx, my, mw, "Chats", "Select a chat. New messages show a count.")
@@ -5379,7 +5379,7 @@ local function drawChatsModal()
     addButton("chats_close", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
 
-local function drawHelpModal()
+function drawHelpModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 64, isPocket() and 16 or 19, "help")
 
     local totalPages = #COMMAND_HELP + 1
@@ -5533,7 +5533,7 @@ function drawCustomUpdateBranchModal()
     addButton("branch_custom_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openUpdateBranchDropdown)
 end
 
-local function drawUpdateModal()
+function drawUpdateModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 68, isPocket() and 20 or 21, "update")
 
     modalHeader(mx, my, mw, "Update Settings", "GitHub updater + branch selector")
@@ -5614,7 +5614,7 @@ local function drawUpdateModal()
     addButton("upd_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
 
-local function drawThemeModal()
+function drawThemeModal()
     local names = { "aegis", "midnight", "slate", "dark", "ocean", "neon", "graphite", "forest", "sunset", "amethyst", "ice", "clean" }
     local rows = math.min(#names, math.max(3, h - 5))
     local mx, my, mw, mh = modalBox(isPocket() and w or 40, rows + 4)
@@ -5637,7 +5637,7 @@ local function drawThemeModal()
     end)
 end
 
-local function drawAppControlsModal()
+function drawAppControlsModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 46, isPocket() and 12 or 13)
 
     modalHeader(mx, my, mw, "App controls", "Close, restart, logout, or reboot safely.")
@@ -5678,7 +5678,7 @@ local function drawAppControlsModal()
 end
 
 
-local function drawSecurityModal()
+function drawSecurityModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 64, isPocket() and 18 or 20)
     modalHeader(mx, my, mw, "Security center", "Privacy, trust, flood protection, and backups.")
 
@@ -5722,7 +5722,7 @@ local function drawSecurityModal()
     addButton("sec_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
 
-local function drawErrorModal()
+function drawErrorModal()
     local mx, my, mw, mh = modalBox(isPocket() and w or 44, 5)
 
     modalHeader(mx, my, mw, "Notice", nil)
@@ -5734,7 +5734,7 @@ local function drawErrorModal()
     end)
 end
 
-local function drawModal()
+function drawModal()
     if state.modal == "main_menu" then
         drawMainMenuModal()
     elseif state.modal == "chats" then
@@ -5794,7 +5794,7 @@ end
 -- Draw chat UI
 -- ============================================================
 
-local function drawTopBar()
+function drawTopBar()
     fill(1, 1, w, 1, T().top)
 
     local unread = totalUnread()
@@ -5822,7 +5822,7 @@ local function drawTopBar()
     end
 end
 
-local function drawConvoList()
+function drawConvoList()
     local lw = leftWidth()
 
     if lw == 0 then
@@ -5904,7 +5904,7 @@ local function drawConvoList()
     end
 end
 
-local function drawMessages()
+function drawMessages()
     local x, top, cw, bottom, areaH = messageArea()
 
     fill(x, top, cw, areaH, T().bg)
@@ -5929,7 +5929,7 @@ local function drawMessages()
     end
 end
 
-local function drawInputBar()
+function drawInputBar()
     local inputLines = getInputLines()
     local countText = tostring(#state.input) .. "/" .. tostring(APP.messageLimit)
     local rows = inputRows()
@@ -5988,7 +5988,7 @@ local function drawInputBar()
     text(x + (lw == 0 and 0 or 1), h, trim(hint, cw - (lw == 0 and 0 or 1)), T().muted, T().bg)
 end
 
-local function drawChat()
+function drawChat()
     clearClickable()
     fill(1, 1, w, h, T().bg)
 
@@ -6002,7 +6002,7 @@ local function drawChat()
     end
 end
 
-local function drawScene()
+function drawScene()
     w, h = term.getSize()
 
     if type(term.setCursorBlink) == "function" then
@@ -6025,7 +6025,7 @@ local function drawScene()
     end
 end
 
-local function draw()
+function draw()
     local parent, win = beginBufferedDraw()
     local ok, err = pcall(drawScene)
     endBufferedDraw(parent, win)
@@ -6054,7 +6054,7 @@ local QUIET_VERSION_KINDS = {
     attachment_end = true
 }
 
-local function shouldShowVersionNotice(msg)
+function shouldShowVersionNotice(msg)
     if state.quietVersionWarnings ~= false and QUIET_VERSION_KINDS[msg.kind] then
         return false
     end
@@ -6071,7 +6071,7 @@ local function shouldShowVersionNotice(msg)
     return true
 end
 
-local function versionNotice(msg)
+function versionNotice(msg)
     if not shouldShowVersionNotice(msg) then return end
 
     local who = displayName(msg.user, msg.publicId, msg.profile)
@@ -6092,7 +6092,7 @@ function isRemoteVersionWarningBody(body)
         or s:find("ignored an old%-format") ~= nil
 end
 
-local function rememberPacket(msg)
+function rememberPacket(msg)
     if not msg.packetId or not msg.publicId then return false end
 
     local packetKey = tostring(msg.publicId) .. ":" .. tostring(msg.packetId)
@@ -6401,7 +6401,7 @@ function shouldProcessVersionMismatch(msg)
     return false
 end
 
-local function handleNetworkMessage(senderId, msg)
+function handleNetworkMessage(senderId, msg)
     if type(msg) ~= "table" then return end
     if msg.app ~= APP.name then return end
     if packetByteSize(msg) > APP.maxPacketBytes then
@@ -6425,7 +6425,7 @@ local function handleNetworkMessage(senderId, msg)
     if handler then handler(senderId, msg) end
 end
 
-local function networkLoop()
+function networkLoop()
     local lastHello = os.clock()
 
     while state.running do
@@ -6453,7 +6453,7 @@ end
 -- Input handling
 -- ============================================================
 
-local function typeIntoField(char)
+function typeIntoField(char)
     if state.screen == "login" or state.screen == "register" then
         if state.focus == "username" then
             state.input = state.input .. char
@@ -6477,7 +6477,7 @@ local function typeIntoField(char)
     end
 end
 
-local function backspaceField()
+function backspaceField()
     if state.screen == "login" or state.screen == "register" then
         if state.focus == "username" then
             state.input = state.input:sub(1, -2)
@@ -6495,7 +6495,7 @@ local function backspaceField()
     state.input = state.input:sub(1, -2)
 end
 
-local function submitModal()
+function submitModal()
     if state.modal == "create" then
         createGroup(state.modalInput, state.modalMode)
         state.modal = nil
@@ -6546,7 +6546,7 @@ local function submitModal()
     end
 end
 
-local function handleKey(key)
+function handleKey(key)
     if key == keys.backspace then
         backspaceField()
         return
@@ -6719,7 +6719,7 @@ function handleMouseDrag(x, y)
     return true
 end
 
-local function handleMouse(x, y)
+function handleMouse(x, y)
     if clickButton(x, y) then return end
     if beginModalDrag(x, y) then return end
 
@@ -6755,7 +6755,7 @@ local function handleMouse(x, y)
     end
 end
 
-local function uiLoop()
+function uiLoop()
     local dirty = true
 
     while state.running do
@@ -6854,7 +6854,7 @@ end
 -- Boot
 -- ============================================================
 
-local function boot()
+function boot()
     clear()
     if type(term.setCursorBlink) == "function" then term.setCursorBlink(false) end
     openModem()

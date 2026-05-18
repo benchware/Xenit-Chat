@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "20.0.6",
+    version = "20.0.7",
     protocolVersion = 19,
     protocolName = "Aegis",
     protocol = "xenitchat_bus",
@@ -279,6 +279,7 @@ local state = {
     settingsScroll = 0,
     compatScroll = 0,
     branchScroll = 0,
+    menuScroll = 0,
     updateBranchesRemote = nil,
     updateBranchesStatus = "fallback",
     updateBranch = "main",
@@ -1848,6 +1849,7 @@ local function openMainMenu()
     state.modal = "main_menu"
     state.modalInput = ""
     state.modalData = nil
+    state.menuScroll = tonumber(state.menuScroll) or 0
 end
 
 local function openChatsModal()
@@ -2491,6 +2493,11 @@ local function openUpdateModal()
     state.modal = "update"
     state.modalInput = ""
     state.modalData = nil
+    -- Make the branch picker feel like a real GUI: load GitHub branches
+    -- automatically the first time Update Settings is opened.
+    if (not state.updateBranchesRemote or #state.updateBranchesRemote == 0) and httpRead then
+        refreshUpdateBranches(true, "system")
+    end
 end
 
 -- ============================================================
@@ -5038,7 +5045,7 @@ local function drawSettingsModal()
         toggleBoolSetting("notifyUpdates", "Update release notifications")
     end)
 
-    addOpt("set_update_settings", "Update settings / branch: " .. updateBranchLabel(), false, openUpdateModal, "accent")
+    addOpt("set_update_settings", "Update settings + branch: " .. updateBranchLabel(), false, openUpdateModal, "accent")
 
     addOpt("set_oldtag", "Show [OLD] tags: " .. onoff(state.showOldClientTags ~= false), state.showOldClientTags ~= false, function()
         toggleBoolSetting("showOldClientTags", "Show [OLD] tags")
@@ -5160,57 +5167,86 @@ local function drawGroupRenameModal()
 end
 
 local function drawMainMenuModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 44, isPocket() and 14 or 15, "main_menu")
+    local desiredW = isPocket() and w or 68
+    local desiredH = isPocket() and 18 or 22
+    local mx, my, mw, mh = modalBox(desiredW, desiredH, "main_menu")
 
-    modalHeader(mx, my, mw, "Menu", trim(currentChatTitle() .. "  |  /help  |  drag header", mw - 2))
+    modalHeader(mx, my, mw, "Menu", trim("Drag header | wheel/arrow to scroll | " .. currentChatTitle(), mw - 2))
 
     local items = {
-        { "Chats", openChatsModal, T().good, colors.black },
-        { "People", function() state.modal = "people" end, T().warn, colors.black },
-        { "P2P Peers", function() state.modal = nil showPeerStatus() end, T().accent, colors.black },
-        { "Friend Inbox", function() state.modal = "friend_inbox" end, T().accent, colors.black },
-        { "Discover Groups", requestDiscovery, T().accent, colors.black },
-        { "New Group", function() state.modal = "create" state.modalInput = "" state.modalMode = "public" end, T().good, colors.black },
-        { "Chat Settings", openGroupSettings, colors.lightGray, colors.black },
-        { (state.pinned and state.pinned[state.current]) and "Unpin Chat" or "Pin Chat", togglePinCurrent, colors.lightGray, colors.black },
-        { "Mark All Read", markAllRead, colors.lightGray, colors.black },
-        { "Direct Message", function() state.modal = "pm" state.modalInput = "" end, colors.lightGray, colors.black },
+        { "Settings", openSettingsModal, T().accent, colors.black, "App options" },
+        { "Update Settings + Branch", openUpdateModal, T().good, colors.black, "GitHub updates, branch picker, notify" },
+        { "Help / Slash Commands", function() state.helpPage = 1 state.modal = "help" end, colors.lightGray, colors.black, "Paged command guide" },
+        { "Chats", openChatsModal, T().good, colors.black, "Switch chats" },
+        { "People & Friends", function() state.modal = "people" end, T().warn, colors.black, "Online users, friends, block" },
+        { "Friend Inbox", function() state.modal = "friend_inbox" end, T().accent, colors.black, "Accept/decline requests" },
+        { "Direct Message", function() state.modal = "pm" state.modalInput = "" end, colors.lightGray, colors.black, "Open a private chat" },
+        { "P2P Peers", function() state.modal = nil showPeerStatus() end, T().accent, colors.black, "Network/compat status" },
+        { "Discover Groups", requestDiscovery, T().accent, colors.black, "Find public groups" },
+        { "New Group", function() state.modal = "create" state.modalInput = "" state.modalMode = "public" end, T().good, colors.black, "Create public/private group" },
+        { "Chat Settings", openGroupSettings, colors.lightGray, colors.black, "Rename/leave/current chat" },
+        { (state.pinned and state.pinned[state.current]) and "Unpin Current Chat" or "Pin Current Chat", togglePinCurrent, colors.lightGray, colors.black, "Keep it near the top" },
+        { "Mark All Read", markAllRead, colors.lightGray, colors.black, "Clear unread badges" },
         { "History Sync", function()
             local count = 0
             for publicId, u in pairs(state.users or {}) do
                 if u.senderId then requestHistorySync(u.senderId, publicId) count = count + 1 end
             end
             state.modal = nil
-            systemMessage("History sync requested from " .. tostring(count) .. " online peer(s).")
-        end, colors.lightGray, colors.black },
-        { "Update Settings", openUpdateModal, colors.lightGray, colors.black },
-        { "Profile", function() state.modal = "profile" state.modalMode = "profile" state.modalInput = state.profile.display or state.username or "" end, colors.lightGray, colors.black },
-        { "Settings", openSettingsModal, colors.lightGray, colors.black },
-        { "Security Center", openSecurityModal, T().warn, colors.black },
-        { "App Controls", openAppControls, T().warn, colors.black },
-        { "Close App", function() shutdownApp("exit") end, T().danger, colors.white }
+            systemMessage("History sync requested from " .. tostring(count) .. " online peer(s).", "system")
+        end, colors.lightGray, colors.black, "Ask peers for recent history" },
+        { "Profile", function() state.modal = "profile" state.modalMode = "profile" state.modalInput = state.profile.display or state.username or "" end, colors.lightGray, colors.black, "Display name/status" },
+        { "Theme", function() state.modal = "theme" end, colors.lightGray, colors.black, "Change look" },
+        { "Security Center", openSecurityModal, T().warn, colors.black, "Privacy, trust, safety" },
+        { "App Controls", openAppControls, T().warn, colors.black, "Restart/close/logout" },
+        { "Close App", function() shutdownApp("exit") end, T().danger, colors.white, "Return to shell" }
     }
 
-    local rowY = my + 3
-    local maxRows = mh - 5
+    local listTop = my + 3
+    local listBottom = my + mh - 3
+    local visibleRows = math.max(1, listBottom - listTop + 1)
+    local maxScroll = math.max(0, #items - visibleRows)
 
-    for i = 1, math.min(#items, maxRows) do
-        local item = items[i]
-        addButton("menu_" .. tostring(i), mx + 1, rowY + i - 1, mw - 2, item[1], item[4], item[3], item[2])
+    state.menuScroll = tonumber(state.menuScroll) or 0
+    if state.menuScroll < 0 then state.menuScroll = 0 end
+    if state.menuScroll > maxScroll then state.menuScroll = maxScroll end
+
+    fill(mx + 1, listTop, mw - 2, visibleRows, colors.lightGray)
+
+    for row = 1, visibleRows do
+        local idx = state.menuScroll + row
+        local item = items[idx]
+        if item then
+            local label = tostring(item[1] or "")
+            if mw >= 54 and item[5] and item[5] ~= "" then
+                local noteRoom = mw - 6 - #label
+                if noteRoom >= 12 then
+                    label = label .. "  -  " .. tostring(item[5])
+                end
+            end
+            addButton("menu_" .. tostring(idx), mx + 1, listTop + row - 1, mw - 4, trim(label, mw - 4), item[4], item[3], item[2])
+        end
+    end
+
+    if #items > visibleRows then
+        text(mx + 1, my + mh - 2, trim("Menu " .. tostring(state.menuScroll + 1) .. "-" .. tostring(math.min(#items, state.menuScroll + visibleRows)) .. "/" .. tostring(#items) .. "  wheel / arrows", mw - 13), colors.gray, colors.lightGray)
+        addButton("menu_up", mx + mw - 10, my + mh - 2, 4, "Up", colors.white, colors.gray, function()
+            state.menuScroll = math.max(0, (state.menuScroll or 0) - 3)
+        end)
+        addButton("menu_down", mx + mw - 5, my + mh - 2, 4, "Dn", colors.white, colors.gray, function()
+            state.menuScroll = math.min(maxScroll, (state.menuScroll or 0) + 3)
+        end)
+    else
+        text(mx + 1, my + mh - 2, trim("Tip: Update Settings combines branch + update controls.", mw - 2), colors.gray, colors.lightGray)
     end
 
     local fy = my + mh - 1
-    local gap = 1
-    local bw = math.max(4, math.floor((mw - 2 - gap * 3) / 4))
-    addButton("menu_theme", mx + 1, fy, bw, "Theme", colors.black, colors.lightGray, function()
-        state.modal = "theme"
-    end)
-    addButton("menu_settings", mx + 1 + bw + gap, fy, bw, "Settings", colors.black, colors.lightGray, openSettingsModal)
-    addButton("menu_help", mx + 1 + (bw + gap) * 2, fy, bw, "Help", colors.black, colors.lightGray, function()
-        state.helpPage = 1
-        state.modal = "help"
-    end)
-    addButton("menu_close", mx + 1 + (bw + gap) * 3, fy, mw - 2 - (bw + gap) * 3, "Close", colors.white, colors.gray, closeModal)
+    local bw1 = math.max(6, math.floor((mw - 4) / 3))
+    local bw2 = bw1
+    local bw3 = mw - 4 - bw1 - bw2
+    addButton("menu_update_footer", mx + 1, fy, bw1, mw < 40 and "Update" or "Update", colors.black, T().good, openUpdateModal)
+    addButton("menu_settings_footer", mx + 2 + bw1, fy, bw2, mw < 40 and "Settings" or "Settings", colors.black, colors.lightGray, openSettingsModal)
+    addButton("menu_close", mx + 3 + bw1 + bw2, fy, bw3, "Close", colors.white, colors.gray, closeModal)
 end
 
 local function drawChatsModal()
@@ -5321,9 +5357,9 @@ end
 
 
 function drawUpdateBranchModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 56, isPocket() and 16 or 18, "update_branch")
+    local mx, my, mw, mh = modalBox(isPocket() and w or 66, isPocket() and 18 or 20, "update_branch")
 
-    modalHeader(mx, my, mw, "Updater branch", "Choose GitHub branch for /update")
+    modalHeader(mx, my, mw, "Choose Update Branch", "Real GitHub branches | wheel/arrow to scroll")
     text(mx + 1, my + 3, trim("Current: " .. updateBranchLabel(), mw - 2), colors.black, colors.lightGray)
     text(mx + 1, my + 4, trim("Repo: " .. tostring(APP.updateOwner or "benchware") .. "/" .. tostring(APP.updateRepo or "Xenit-Chat"), mw - 2), colors.gray, colors.lightGray)
     text(mx + 1, my + 5, trim("Source: " .. (state.updateBranchesStatus == "github" and "GitHub API" or "fallback") .. " | Refresh to scan", mw - 2), colors.gray, colors.lightGray)
@@ -5399,50 +5435,63 @@ function drawCustomUpdateBranchModal()
 end
 
 local function drawUpdateModal()
-    local mx, my, mw, mh = modalBox(isPocket() and w or 60, isPocket() and 16 or 18, "update")
+    local mx, my, mw, mh = modalBox(isPocket() and w or 68, isPocket() and 20 or 21, "update")
 
-    modalHeader(mx, my, mw, "Update settings", "Branch + check/install + shared metadata")
+    modalHeader(mx, my, mw, "Update Settings", "GitHub updater + branch selector")
     text(mx + 1, my + 3, trim("Repo: " .. tostring(APP.updateOwner or "benchware") .. "/" .. tostring(APP.updateRepo or "Xenit-Chat"), mw - 2), colors.black, colors.lightGray)
-    text(mx + 1, my + 4, trim("Branch: " .. updateBranchLabel() .. " | Source: " .. (state.updateBranchesStatus == "github" and "GitHub API" or "fallback"), mw - 2), colors.black, colors.lightGray)
-    text(mx + 1, my + 5, trim("Local: v" .. appVersion() .. " | Notify: " .. onoff(state.notifyUpdates ~= false), mw - 2), colors.gray, colors.lightGray)
+    text(mx + 1, my + 4, trim("Local: v" .. appVersion() .. " | Branch source: " .. (state.updateBranchesStatus == "github" and "GitHub API" or "fallback"), mw - 2), colors.gray, colors.lightGray)
 
-    local metaLines = updateMetaSummaryLines()
-    local y = my + 7
-    text(mx + 1, my + 6, trim("Known remote metadata:", mw - 2), T().top, colors.lightGray)
-    if #metaLines == 0 then
-        text(mx + 2, y, trim("No update metadata yet. Press Check or Refresh.", mw - 4), colors.gray, colors.lightGray)
-        y = y + 1
-    else
-        for i = 1, math.min(#metaLines, math.max(1, mh - 12)) do
-            text(mx + 2, y, trim(metaLines[i], mw - 4), colors.gray, colors.lightGray)
-            y = y + 1
-        end
-    end
-
-    local fy = my + mh - 2
-    addButton("upd_check", mx + 1, fy, 9, "Check", colors.black, T().accent, function()
-        state.modal = nil
-        checkForUpdate(false, false, false, "system")
-    end)
-
-    addButton("upd_install", mx + 11, fy, 10, "Install", colors.black, T().good, function()
-        state.modal = nil
-        checkForUpdate(false, true, false, "system")
-    end)
-
-    addButton("upd_branch", mx + 22, fy, 10, "Branch", colors.black, colors.lightGray, openUpdateBranchDropdown)
-
-    addButton("upd_refresh", mx + 33, fy, 10, "Refresh", colors.black, colors.lightGray, function()
-        refreshUpdateBranches(false, "system")
-    end)
-
-    addButton("upd_notify", mx + 1, my + mh - 1, 10, state.notifyUpdates ~= false and "Notify ON" or "Notify OFF", colors.black, state.notifyUpdates ~= false and T().good or colors.lightGray, function()
+    addButton("upd_branch_big", mx + 1, my + 6, mw - 2, trim("Choose branch: " .. updateBranchLabel(), mw - 2), colors.black, T().accent, openUpdateBranchDropdown)
+    addButton("upd_notify_big", mx + 1, my + 7, mw - 2, trim("Notify me when a new update releases: " .. onoff(state.notifyUpdates ~= false), mw - 2), colors.black, state.notifyUpdates ~= false and T().good or colors.white, function()
         state.notifyUpdates = not state.notifyUpdates
         savePrefs()
         systemMessage("Update release notifications: " .. onoff(state.notifyUpdates ~= false) .. ".", "system")
     end)
 
-    addButton("upd_close", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
+    local y = my + 9
+    text(mx + 1, y, trim("Known remote versions:", mw - 2), T().top, colors.lightGray)
+    y = y + 1
+    local metaLines = updateMetaSummaryLines()
+    local maxMeta = math.max(2, mh - 15)
+    if #metaLines == 0 then
+        text(mx + 2, y, trim("No metadata yet. Press Check or Refresh Branches.", mw - 4), colors.gray, colors.lightGray)
+        y = y + 1
+    else
+        for i = 1, math.min(#metaLines, maxMeta) do
+            text(mx + 2, y, trim(metaLines[i], mw - 4), colors.gray, colors.lightGray)
+            y = y + 1
+        end
+        if #metaLines > maxMeta then
+            text(mx + 2, y, trim("...and " .. tostring(#metaLines - maxMeta) .. " more branch result(s)", mw - 4), colors.gray, colors.lightGray)
+            y = y + 1
+        end
+    end
+
+    local fy = my + mh - 3
+    local gap = 1
+    local usable = mw - 2 - gap * 3
+    local bw = math.max(7, math.floor(usable / 4))
+    addButton("upd_check", mx + 1, fy, bw, "Check", colors.black, T().accent, function()
+        state.modal = nil
+        checkForUpdate(false, false, false, "system")
+    end)
+
+    addButton("upd_install", mx + 1 + (bw + gap), fy, bw, "Install", colors.black, T().good, function()
+        state.modal = nil
+        checkForUpdate(false, true, false, "system")
+    end)
+
+    addButton("upd_refresh", mx + 1 + (bw + gap) * 2, fy, bw, mw < 46 and "Branches" or "Refresh Branches", colors.black, colors.lightGray, function()
+        refreshUpdateBranches(false, "system")
+    end)
+
+    addButton("upd_force", mx + 1 + (bw + gap) * 3, fy, mw - 2 - (bw + gap) * 3, "Force", colors.white, T().warn, function()
+        state.modal = nil
+        checkForUpdate(false, true, true, "system")
+    end)
+
+    text(mx + 1, my + mh - 2, trim("Tip: Branch button opens the branch GUI. /branch also opens it.", mw - 2), colors.gray, colors.lightGray)
+    addButton("upd_back", mx + mw - 8, my + mh - 1, 8, "Back", colors.white, colors.gray, openMainMenu)
 end
 
 local function drawThemeModal()
@@ -6379,6 +6428,21 @@ local function handleKey(key)
         return
     end
 
+    if state.modal == "main_menu" then
+        if key == keys.up then
+            state.menuScroll = math.max(0, (state.menuScroll or 0) - 1)
+        elseif key == keys.down then
+            state.menuScroll = (state.menuScroll or 0) + 1
+        elseif key == keys.pageUp then
+            state.menuScroll = math.max(0, (state.menuScroll or 0) - 5)
+        elseif key == keys.pageDown then
+            state.menuScroll = (state.menuScroll or 0) + 5
+        elseif key == keys.home then
+            state.menuScroll = 0
+        end
+        return
+    end
+
     if state.modal == "help" then
         local totalPages = #COMMAND_HELP + 1
         if key == keys.left or key == keys.up or key == keys.pageUp then
@@ -6557,7 +6621,13 @@ local function uiLoop()
             redraw = true
 
         elseif event == "mouse_scroll" then
-            if state.modal == "help" then
+            if state.modal == "main_menu" then
+                if p1 < 0 then
+                    state.menuScroll = math.max(0, (state.menuScroll or 0) - 3)
+                else
+                    state.menuScroll = (state.menuScroll or 0) + 3
+                end
+            elseif state.modal == "help" then
                 local totalPages = #COMMAND_HELP + 1
                 if p1 < 0 then
                     state.helpPage = math.max(1, (state.helpPage or 1) - 1)

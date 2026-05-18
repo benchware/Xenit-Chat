@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "20.0.10",
+    version = "20.0.11",
     protocolVersion = 19,
     protocolName = "Aegis",
     protocol = "xenitchat_bus",
@@ -1897,6 +1897,21 @@ local function clearCurrentChat()
     end
 end
 
+local function clearSystemChannel(showNotice)
+    ensureSystemChannel()
+    state.messages.system = {}
+    if state.messageSeen then state.messageSeen.system = {} end
+    if state.convos.system then
+        state.convos.system.unread = 0
+        state.convos.system.last = os.time()
+    end
+    if saveHistory then saveHistory() end
+    savePrefs()
+    if showNotice ~= false then
+        addMessage("system", "system", "#system cleared locally.", "system", { skipSave = true })
+    end
+end
+
 local function getSortedUsers()
     local now = os.clock()
     local list = {}
@@ -3582,6 +3597,7 @@ COMMAND_HELP = {
     {
         title = "System",
         items = {
+            { cmd = "/clearsystem", desc = "Clear local #system messages.", aliases = {"/clear-system", "/systemclear"} },
             { cmd = "/sync", desc = "Request chat history sync.", aliases = {"/history"} },
             { cmd = "/update", args = "[check|install|force]", desc = "Check or install GitHub updates." },
             { cmd = "/branch", args = "[name|refresh]", desc = "Pick or refresh update branches." },
@@ -3775,6 +3791,9 @@ local function handleSlashCommand(body)
     elseif command == "cleanattachments" or command == "cleanupattachments" or command == "clearattachments" then
         local mode = rest ~= "" and rest or "expired"
         cleanupAttachments(mode, true)
+
+    elseif command == "clearsystem" or command == "clear-system" or command == "systemclear" then
+        clearSystemChannel(true)
 
     elseif command == "version" or command == "about" then
         showVersionInfo()
@@ -5225,12 +5244,13 @@ local function drawMainMenuModal()
         { "People & Friends", function() state.modal = "people" end, T().warn, colors.black, "Online users, friends, block" },
         { "Friend Inbox", function() state.modal = "friend_inbox" end, T().accent, colors.black, "Accept/decline requests" },
         { "Direct Message", function() state.modal = "pm" state.modalInput = "" end, colors.lightGray, colors.black, "Open a private chat" },
-        { "P2P Peers", function() state.modal = nil showPeerStatus() end, T().accent, colors.black, "Network/compat status" },
+        { "P2P Peers", function() state.modal = nil ensureSystemChannel() switchConvo("system") showPeerStatus() end, T().accent, colors.black, "Network/compat status" },
         { "Discover Groups", requestDiscovery, T().accent, colors.black, "Find public groups" },
         { "New Group", function() state.modal = "create" state.modalInput = "" state.modalMode = "public" end, T().good, colors.black, "Create public/private group" },
         { "Chat Settings", openGroupSettings, colors.lightGray, colors.black, "Rename/leave/current chat" },
         { (state.pinned and state.pinned[state.current]) and "Unpin Current Chat" or "Pin Current Chat", togglePinCurrent, colors.lightGray, colors.black, "Keep it near the top" },
         { "Mark All Read", markAllRead, colors.lightGray, colors.black, "Clear unread badges" },
+        { "Clear #system", function() state.modal = nil ensureSystemChannel() switchConvo("system") clearSystemChannel(true) end, colors.lightGray, colors.black, "Clear local system output" },
         { "History Sync", function()
             local count = 0
             for publicId, u in pairs(state.users or {}) do

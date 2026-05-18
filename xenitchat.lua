@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "20.0.11",
+    version = "20.0.12",
     protocolVersion = 19,
     protocolName = "Aegis",
     protocol = "xenitchat_bus",
@@ -25,11 +25,11 @@ local APP = {
     historySyncCooldown = 12,
     versionNoticeCooldown = 90,
     maxPacketBytes = 12000,
-    maxAttachmentBytes = 48000,
+    maxAttachmentBytes = 1024 * 1024,
     attachmentChunkSize = 5000,
     attachmentTimeout = 45,
     attachmentDefaultExpireDays = 3,
-    attachmentStorageLimitKB = 256,
+    attachmentStorageLimitKB = 1024,
     floodWindow = 6,
     floodLimit = 24,
 
@@ -320,7 +320,7 @@ local state = {
     attachmentLog = {},
     autoCleanupAttachments = true,
     attachmentExpireDays = 3,
-    attachmentStorageLimitKB = 256,
+    attachmentStorageLimitKB = 1024,
     legacyAttachmentNotice = true,
     restartRequested = false,
     exitReason = nil,
@@ -904,7 +904,7 @@ local function defaultPrefs()
         autoPlayAudio = false,
         autoCleanupAttachments = true,
         attachmentExpireDays = 3,
-        attachmentStorageLimitKB = 256,
+        attachmentStorageLimitKB = 1024,
         legacyAttachmentNotice = true,
         attachmentLog = {},
         autoHistorySync = true,
@@ -1322,11 +1322,16 @@ local function commandOutputKey(key)
         end
         return key
     end
-    if state._slashCommandActive and state.useSystemSlashChannel ~= false then
+
+    -- Only true system/diagnostic slash commands should auto-route to #system.
+    -- Chat-producing commands like /audio, /attach, /script, /ping, /friend, /pm,
+    -- /join, etc. keep feedback in the current chat/channel.
+    if state._slashCommandActive and state._slashOutputToSystem and state.useSystemSlashChannel ~= false then
         ensureSystemChannel()
         state.slashOpenedSystemOutput = true
         return "system"
     end
+
     return state.current
 end
 
@@ -3249,7 +3254,7 @@ end
 
 function cycleAttachmentStorageLimit()
     local values = { 128, 256, 512, 1024, 2048, 0 }
-    local cur = tonumber(state.attachmentStorageLimitKB or 256) or 256
+    local cur = tonumber(state.attachmentStorageLimitKB or 1024) or 1024
     local idx = 1
     for i, v in ipairs(values) do if v == cur then idx = i break end end
     idx = idx + 1
@@ -3690,6 +3695,21 @@ function showHelpForCommand(name)
     end
 end
 
+function isSystemSlashCommand(command)
+    command = tostring(command or ""):lower()
+    local systemCommands = {
+        help = true, ["?"] = true, commands = true, slash = true, shortcuts = true,
+        update = true, branch = true, branches = true, settings = true, prefs = true,
+        peers = true, net = true, network = true, who = true, online = true,
+        version = true, about = true, audit = true, backup = true,
+        cleanattachments = true, cleanupattachments = true, clearattachments = true,
+        clearsystem = true, ["clear-system"] = true, systemclear = true,
+        security = true, safe = true, privacy = true, compat = true, legacy = true, oldclients = true,
+        attachments = true, files = true
+    }
+    return systemCommands[command] == true
+end
+
 local function handleSlashCommand(body)
     if body:sub(1, 1) ~= "/" then return false end
 
@@ -3698,6 +3718,7 @@ local function handleSlashCommand(body)
     rest = rest or ""
     local slashOrigin = state.current
     state._slashCommandActive = true
+    state._slashOutputToSystem = isSystemSlashCommand(command)
     state.slashOpenedSystemOutput = false
 
     if command == "help" or command == "?" or command == "commands" or command == "slash" or command == "shortcuts" then
@@ -3909,6 +3930,7 @@ local function handleSlashCommand(body)
     state.input = ""
     local shouldOpenSystem = state.slashOpenedSystemOutput and state.useSystemSlashChannel ~= false and state.current == slashOrigin
     state._slashCommandActive = false
+    state._slashOutputToSystem = false
     state.slashOpenedSystemOutput = false
     if shouldOpenSystem then
         ensureSystemChannel()

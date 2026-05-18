@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "20.0.12",
+    version = "20.0.13",
     protocolVersion = 19,
     protocolName = "Aegis",
     protocol = "xenitchat_bus",
@@ -6112,46 +6112,10 @@ local function rememberPacket(msg)
     return false
 end
 
-local function handleNetworkMessage(senderId, msg)
-    if type(msg) ~= "table" then return end
-    if msg.app ~= APP.name then return end
-    if packetByteSize(msg) > APP.maxPacketBytes then
-        recordSecurityEvent("Dropped oversized network packet.")
-        return
-    end
-    if tonumber(msg.version) == nil then return end
-    if not msg.user or not msg.publicId then return end
-    if msg.publicId == state.publicId then return end
-
-    if msg.compatMirror and tonumber(msg.sourceProtocolVersion or 0) >= protocolVersion() then
-        return
-    end
-
-    if rememberPacket(msg) then return end
-
-    if not sameProtocolVersion(msg.version) then
-        local remoteVersion = tonumber(msg.version)
-
-        if remoteVersion and remoteVersion < protocolVersion() and shouldAcceptOldClients() then
-            -- Best-effort compatibility mode. Marked buggy because old clients may
-            -- use missing fields, older message formats, or noisier packet flows.
-        elseif QUIET_VERSION_KINDS[msg.kind] then
-            -- Background packets from older/newer clients should not spam chat.
-            -- Keep processing them where the schema is harmless enough.
-        else
-            versionNotice(msg)
-            return
-        end
-    end
-
-    if state.blocked[msg.publicId] then return end
-    if rateLimited(msg.publicId, msg.kind) then return end
-    if isMuted(msg.publicId) and (msg.kind == "chat" or msg.kind == "pm" or msg.kind == "ping") then return end
-
-    recordIdentity(msg.publicId, msg)
-
+function updateRemoteUser(senderId, msg)
     local remoteVersionNumber = tonumber(msg.version)
     local remoteOldClient = false
+
     if remoteVersionNumber and remoteVersionNumber < protocolVersion() then remoteOldClient = true end
     if msg.compatMirror == true then remoteOldClient = true end
     if remoteVersionNumber and remoteVersionNumber <= protocolVersion() and not msg.protocolName and not msg.appVersion then remoteOldClient = true end
@@ -6169,225 +6133,296 @@ local function handleNetworkMessage(senderId, msg)
         oldClient = remoteOldClient,
         lastSeenClock = os.clock()
     }
+end
 
-    if msg.kind == "hello" then
-        safeSendTo(senderId, "hello_ack", {
-            current = state.current
+function handleNetHello(senderId, msg)
+    safeSendTo(senderId, "hello_ack", { current = state.current })
+
+    local selectedMeta = state.updateMetaCache and state.updateMetaCache[selectedUpdateBranch()]
+    if selectedMeta then
+        safeSendTo(senderId, "update_meta", {
+            branch = selectedMeta.branch,
+            remoteVersion = selectedMeta.version,
+            source = "peer-cache"
         })
-        local selectedMeta = state.updateMetaCache and state.updateMetaCache[selectedUpdateBranch()]
-        if selectedMeta then
-            safeSendTo(senderId, "update_meta", { branch = selectedMeta.branch, remoteVersion = selectedMeta.version, source = "peer-cache" })
-        end
-        if state.autoHistorySync ~= false then requestHistorySync(senderId, msg.publicId) end
+    end
 
-    elseif msg.kind == "hello_ack" then
-        if state.autoHistorySync ~= false then requestHistorySync(senderId, msg.publicId) end
-        return
+    if state.autoHistorySync ~= false then
+        requestHistorySync(senderId, msg.publicId)
+    end
+end
 
-    elseif msg.kind == "ping" then
-        if shouldAnswerPing(msg) then
-            if state.pingNotifications ~= false and msg.scope == "here" then
-                local c = state.convos[msg.key or ""] or { title = msg.title or msg.key or "here" }
-                systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " pinged @here in " .. chatLabel(c, true) .. ".")
-            elseif state.pingNotifications ~= false and msg.scope == "everyone" then
-                systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " pinged @everyone.")
-            end
-            safeSendTo(senderId, "pong", { pingId = msg.pingId, toPublicId = msg.publicId, scope = msg.scope, key = msg.key })
-        end
+function handleNetHelloAck(senderId, msg)
+    if state.autoHistorySync ~= false then
+        requestHistorySync(senderId, msg.publicId)
+    end
+end
 
-    elseif msg.kind == "pong" then
-        receivePong(msg)
+function handleNetPing(senderId, msg)
+    if not shouldAnswerPing(msg) then return end
 
-    elseif msg.kind == "update_meta" then
-        if msg.branch and msg.remoteVersion then
-            rememberUpdateMeta(msg.branch, msg.remoteVersion, displayName(msg.user, msg.publicId, msg.profile), msg.publicId)
-        end
+    if state.pingNotifications ~= false and msg.scope == "here" then
+        local c = state.convos[msg.key or ""] or { title = msg.title or msg.key or "here" }
+        systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " pinged @here in " .. chatLabel(c, true) .. ".")
+    elseif state.pingNotifications ~= false and msg.scope == "everyone" then
+        systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " pinged @everyone.")
+    end
 
-    elseif msg.kind == "history_request" then
-        if shouldShareHistoryWith(msg.publicId) then
-            safeSendTo(senderId, "history_reply", {
-                bundles = makeHistoryBundle(msg.keys or {}, msg.publicId)
-            })
-        elseif state.securityAlerts ~= false then
-            recordSecurityEvent("Blocked history sync request from non-friend #" .. shortId(msg.publicId) .. ".")
-        end
+    safeSendTo(senderId, "pong", {
+        pingId = msg.pingId,
+        toPublicId = msg.publicId,
+        scope = msg.scope,
+        key = msg.key
+    })
+end
 
-    elseif msg.kind == "history_reply" then
-        local imported = importHistoryBundles(msg.bundles, msg.publicId)
-        if imported > 0 then
-            addMessage("global", "system", "Synced " .. tostring(imported) .. " older message(s) from " .. displayName(msg.user, msg.publicId, msg.profile) .. ".", "system", { silent = true })
-        end
+function handleNetUpdateMeta(senderId, msg)
+    if msg.branch and msg.remoteVersion then
+        rememberUpdateMeta(msg.branch, msg.remoteVersion, displayName(msg.user, msg.publicId, msg.profile), msg.publicId)
+    end
+end
 
-    elseif msg.kind == "discover" then
-        local channels = {}
-
-        for key, c in pairs(state.convos) do
-            if c.type == "public" and c.listed ~= false and c.private ~= true and not state.leftGroups[key] then
-                table.insert(channels, {
-                    key = key,
-                    title = c.title,
-                    owner = c.owner or state.username
-                })
-            end
-        end
-
-        safeSendTo(senderId, "discover_reply", {
-            channels = channels
+function handleNetHistoryRequest(senderId, msg)
+    if shouldShareHistoryWith(msg.publicId) then
+        safeSendTo(senderId, "history_reply", {
+            bundles = makeHistoryBundle(msg.keys or {}, msg.publicId)
         })
+    elseif state.securityAlerts ~= false then
+        recordSecurityEvent("Blocked history sync request from non-friend #" .. shortId(msg.publicId) .. ".")
+    end
+end
 
-    elseif msg.kind == "discover_reply" then
-        if type(msg.channels) == "table" then
-            for _, c in ipairs(msg.channels) do
-                if type(c) == "table" and c.key and not state.leftGroups[c.key] then
-                    state.discover[c.key] = {
-                        key = c.key,
-                        title = c.title or c.key,
-                        owner = c.owner or msg.user
-                    }
-                end
-            end
-        end
+function handleNetHistoryReply(senderId, msg)
+    local imported = importHistoryBundles(msg.bundles, msg.publicId)
+    if imported > 0 then
+        addMessage("global", "system", "Synced " .. tostring(imported) .. " older message(s) from " .. displayName(msg.user, msg.publicId, msg.profile) .. ".", "system", { silent = true })
+    end
+end
 
-    elseif msg.kind == "channel_create" then
-        if msg.key and msg.listed ~= false and not state.leftGroups[msg.key] then
-            ensureConvo(msg.key, msg.title or msg.key, "public", msg.private or false, true, msg.user)
-            state.discover[msg.key] = {
-                key = msg.key,
-                title = msg.title or msg.key,
-                owner = msg.user
-            }
-        end
+function handleNetDiscover(senderId, msg)
+    local channels = {}
 
-    elseif msg.kind == "join" then
-        return
-
-    elseif msg.kind == "chat" then
-        if state.suppressRemoteVersionWarnings ~= false and isRemoteVersionWarningBody(msg.body) then
-            return
-        end
-        if msg.key and msg.body and not state.leftGroups[msg.key] then
-            local known = state.convos[msg.key] ~= nil
-            local allowAuto = msg.key == "global" or (state.autoJoinPublicGroups ~= false and msg.listed ~= false and msg.private ~= true)
-
-            if known or allowAuto then
-                ensureConvo(msg.key, msg.title or msg.key, "public", msg.private or false, msg.listed ~= false, msg.user)
-
-                addMessage(msg.key, displayName(msg.user, msg.publicId, msg.profile), msg.body, "chat", {
-                    msgId = msg.msgId,
-                    fromId = msg.publicId
-                })
-            end
-        end
-
-    elseif msg.kind == "channel_rename" then
-        if msg.key and msg.title and state.convos[msg.key] and not state.leftGroups[msg.key] then
-            renameGroupLocal(msg.key, msg.title, displayName(msg.user, msg.publicId, msg.profile))
-        end
-
-    elseif msg.kind == "channel_leave" then
-        return
-
-    elseif msg.kind == "pm" then
-        local intended = false
-
-        if msg.toPublicId and msg.toPublicId == state.publicId then
-            intended = true
-        elseif not msg.toPublicId and msg.toName == state.username then
-            intended = true
-        end
-
-        if intended and msg.body then
-            if not shouldAcceptDm(msg.publicId) then
-                if state.securityAlerts ~= false then
-                    recordSecurityEvent("Blocked DM from " .. displayName(msg.user, msg.publicId, msg.profile) .. " due to privacy setting.")
-                end
-                return
-            end
-            local fromName = displayName(msg.user, msg.publicId, msg.profile)
-            local key = pmKeyFor(msg.publicId, fromName)
-
-            ensureConvo(key, fromName, "pm", true, false, fromName, msg.publicId)
-
-            addMessage(key, fromName, msg.body, "pm", {
-                msgId = msg.msgId,
-                fromId = msg.publicId
+    for key, c in pairs(state.convos) do
+        if c.type == "public" and c.listed ~= false and c.private ~= true and not state.leftGroups[key] then
+            table.insert(channels, {
+                key = key,
+                title = c.title,
+                owner = c.owner or state.username
             })
-
-            if state.current == key then
-                broadcast("read", {
-                    toPublicId = msg.publicId,
-                    msgId = msg.msgId
-                })
-            end
-        end
-
-
-    elseif msg.kind == "friend_request" then
-        if msg.toPublicId == state.publicId and not state.friends[msg.publicId] then
-            if not state.friendRequests.sent[msg.publicId] then
-                state.friendRequests.inbox[msg.publicId] = requestRecord(msg.publicId, state.users[msg.publicId], "incoming")
-                savePrefs()
-                if state.friendNotifications ~= false then systemMessage("Friend request from " .. displayName(msg.user, msg.publicId, msg.profile) .. ". Open People > Inbox.") end
-            else
-                addFriendDirect(msg.publicId, state.users[msg.publicId])
-                broadcast("friend_accept", {
-                    toPublicId = msg.publicId
-                })
-                if state.friendNotifications ~= false then systemMessage("You and " .. displayName(msg.user, msg.publicId, msg.profile) .. " are now friends.") end
-            end
-        end
-
-    elseif msg.kind == "friend_accept" then
-        if msg.toPublicId == state.publicId then
-            addFriendDirect(msg.publicId, state.users[msg.publicId])
-            if state.friendNotifications ~= false then systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " accepted your friend request.") end
-        end
-
-    elseif msg.kind == "friend_decline" then
-        if msg.toPublicId == state.publicId then
-            cleanRequests(msg.publicId)
-            savePrefs()
-            systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " declined your friend request.")
-        end
-
-    elseif msg.kind == "friend_cancel" then
-        if msg.toPublicId == state.publicId then
-            if state.friendRequests and state.friendRequests.inbox then
-                state.friendRequests.inbox[msg.publicId] = nil
-                savePrefs()
-            end
-        end
-
-    elseif msg.kind == "unfriend" then
-        if msg.toPublicId == state.publicId then
-            state.friends[msg.publicId] = nil
-            cleanRequests(msg.publicId)
-            savePrefs()
-            systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " removed you as a friend.")
-        end
-
-    elseif msg.kind == "attachment_start" then
-        receiveAttachmentStart(msg)
-
-    elseif msg.kind == "attachment_chunk" then
-        receiveAttachmentChunk(msg)
-
-    elseif msg.kind == "attachment_end" then
-        receiveAttachmentEnd(msg)
-
-    elseif msg.kind == "read" then
-        if msg.toPublicId == state.publicId then
-            local key = pmKeyFor(msg.publicId, msg.user)
-
-            if state.messages[key] then
-                for _, m in ipairs(state.messages[key]) do
-                    if m.outgoing then
-                        m.seen = true
-                    end
-                end
-            end
         end
     end
+
+    safeSendTo(senderId, "discover_reply", { channels = channels })
+end
+
+function handleNetDiscoverReply(senderId, msg)
+    if type(msg.channels) ~= "table" then return end
+
+    for _, c in ipairs(msg.channels) do
+        if type(c) == "table" and c.key and not state.leftGroups[c.key] then
+            state.discover[c.key] = {
+                key = c.key,
+                title = c.title or c.key,
+                owner = c.owner or msg.user
+            }
+        end
+    end
+end
+
+function handleNetChannelCreate(senderId, msg)
+    if msg.key and msg.listed ~= false and not state.leftGroups[msg.key] then
+        ensureConvo(msg.key, msg.title or msg.key, "public", msg.private or false, true, msg.user)
+        state.discover[msg.key] = {
+            key = msg.key,
+            title = msg.title or msg.key,
+            owner = msg.user
+        }
+    end
+end
+
+function handleNetChat(senderId, msg)
+    if state.suppressRemoteVersionWarnings ~= false and isRemoteVersionWarningBody(msg.body) then return end
+    if not (msg.key and msg.body) then return end
+    if state.leftGroups[msg.key] then return end
+
+    local known = state.convos[msg.key] ~= nil
+    local allowAuto = msg.key == "global" or (state.autoJoinPublicGroups ~= false and msg.listed ~= false and msg.private ~= true)
+    if not (known or allowAuto) then return end
+
+    ensureConvo(msg.key, msg.title or msg.key, "public", msg.private or false, msg.listed ~= false, msg.user)
+    addMessage(msg.key, displayName(msg.user, msg.publicId, msg.profile), msg.body, "chat", {
+        msgId = msg.msgId,
+        fromId = msg.publicId
+    })
+end
+
+function handleNetChannelRename(senderId, msg)
+    if msg.key and msg.title and state.convos[msg.key] and not state.leftGroups[msg.key] then
+        renameGroupLocal(msg.key, msg.title, displayName(msg.user, msg.publicId, msg.profile))
+    end
+end
+
+function handleNetPm(senderId, msg)
+    local intended = false
+
+    if msg.toPublicId and msg.toPublicId == state.publicId then
+        intended = true
+    elseif not msg.toPublicId and msg.toName == state.username then
+        intended = true
+    end
+
+    if not (intended and msg.body) then return end
+
+    if not shouldAcceptDm(msg.publicId) then
+        if state.securityAlerts ~= false then
+            recordSecurityEvent("Blocked DM from " .. displayName(msg.user, msg.publicId, msg.profile) .. " due to privacy setting.")
+        end
+        return
+    end
+
+    local fromName = displayName(msg.user, msg.publicId, msg.profile)
+    local key = pmKeyFor(msg.publicId, fromName)
+
+    ensureConvo(key, fromName, "pm", true, false, fromName, msg.publicId)
+    addMessage(key, fromName, msg.body, "pm", {
+        msgId = msg.msgId,
+        fromId = msg.publicId
+    })
+
+    if state.current == key then
+        broadcast("read", {
+            toPublicId = msg.publicId,
+            msgId = msg.msgId
+        })
+    end
+end
+
+function handleNetFriendRequest(senderId, msg)
+    if msg.toPublicId ~= state.publicId or state.friends[msg.publicId] then return end
+
+    if not state.friendRequests.sent[msg.publicId] then
+        state.friendRequests.inbox[msg.publicId] = requestRecord(msg.publicId, state.users[msg.publicId], "incoming")
+        savePrefs()
+        if state.friendNotifications ~= false then
+            systemMessage("Friend request from " .. displayName(msg.user, msg.publicId, msg.profile) .. ". Open People > Inbox.")
+        end
+    else
+        addFriendDirect(msg.publicId, state.users[msg.publicId])
+        broadcast("friend_accept", { toPublicId = msg.publicId })
+        if state.friendNotifications ~= false then
+            systemMessage("You and " .. displayName(msg.user, msg.publicId, msg.profile) .. " are now friends.")
+        end
+    end
+end
+
+function handleNetFriendAccept(senderId, msg)
+    if msg.toPublicId ~= state.publicId then return end
+    addFriendDirect(msg.publicId, state.users[msg.publicId])
+    if state.friendNotifications ~= false then
+        systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " accepted your friend request.")
+    end
+end
+
+function handleNetFriendDecline(senderId, msg)
+    if msg.toPublicId ~= state.publicId then return end
+    cleanRequests(msg.publicId)
+    savePrefs()
+    systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " declined your friend request.")
+end
+
+function handleNetFriendCancel(senderId, msg)
+    if msg.toPublicId == state.publicId and state.friendRequests and state.friendRequests.inbox then
+        state.friendRequests.inbox[msg.publicId] = nil
+        savePrefs()
+    end
+end
+
+function handleNetUnfriend(senderId, msg)
+    if msg.toPublicId ~= state.publicId then return end
+    state.friends[msg.publicId] = nil
+    cleanRequests(msg.publicId)
+    savePrefs()
+    systemMessage(displayName(msg.user, msg.publicId, msg.profile) .. " removed you as a friend.")
+end
+
+function handleNetRead(senderId, msg)
+    if msg.toPublicId ~= state.publicId then return end
+
+    local key = pmKeyFor(msg.publicId, msg.user)
+    if not state.messages[key] then return end
+
+    for _, m in ipairs(state.messages[key]) do
+        if m.outgoing then
+            m.seen = true
+        end
+    end
+end
+
+NET_KIND_HANDLERS = {
+    hello = handleNetHello,
+    hello_ack = handleNetHelloAck,
+    ping = handleNetPing,
+    pong = function(senderId, msg) receivePong(msg) end,
+    update_meta = handleNetUpdateMeta,
+    history_request = handleNetHistoryRequest,
+    history_reply = handleNetHistoryReply,
+    discover = handleNetDiscover,
+    discover_reply = handleNetDiscoverReply,
+    channel_create = handleNetChannelCreate,
+    join = function() end,
+    chat = handleNetChat,
+    channel_rename = handleNetChannelRename,
+    channel_leave = function() end,
+    pm = handleNetPm,
+    friend_request = handleNetFriendRequest,
+    friend_accept = handleNetFriendAccept,
+    friend_decline = handleNetFriendDecline,
+    friend_cancel = handleNetFriendCancel,
+    unfriend = handleNetUnfriend,
+    attachment_start = function(senderId, msg) receiveAttachmentStart(msg) end,
+    attachment_chunk = function(senderId, msg) receiveAttachmentChunk(msg) end,
+    attachment_end = function(senderId, msg) receiveAttachmentEnd(msg) end,
+    read = handleNetRead
+}
+
+function shouldProcessVersionMismatch(msg)
+    if sameProtocolVersion(msg.version) then return true end
+
+    local remoteVersion = tonumber(msg.version)
+    if remoteVersion and remoteVersion < protocolVersion() and shouldAcceptOldClients() then
+        return true
+    end
+
+    if QUIET_VERSION_KINDS[msg.kind] then
+        return true
+    end
+
+    versionNotice(msg)
+    return false
+end
+
+local function handleNetworkMessage(senderId, msg)
+    if type(msg) ~= "table" then return end
+    if msg.app ~= APP.name then return end
+    if packetByteSize(msg) > APP.maxPacketBytes then
+        recordSecurityEvent("Dropped oversized network packet.")
+        return
+    end
+    if tonumber(msg.version) == nil then return end
+    if not msg.user or not msg.publicId then return end
+    if msg.publicId == state.publicId then return end
+    if msg.compatMirror and tonumber(msg.sourceProtocolVersion or 0) >= protocolVersion() then return end
+    if rememberPacket(msg) then return end
+    if not shouldProcessVersionMismatch(msg) then return end
+    if state.blocked[msg.publicId] then return end
+    if rateLimited(msg.publicId, msg.kind) then return end
+    if isMuted(msg.publicId) and (msg.kind == "chat" or msg.kind == "pm" or msg.kind == "ping") then return end
+
+    recordIdentity(msg.publicId, msg)
+    updateRemoteUser(senderId, msg)
+
+    local handler = NET_KIND_HANDLERS[msg.kind]
+    if handler then handler(senderId, msg) end
 end
 
 local function networkLoop()

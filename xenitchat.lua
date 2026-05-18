@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "20.0.14",
+    version = "20.0.16",
     protocolVersion = 19,
     protocolName = "Aegis",
     protocol = "xenitchat_bus",
@@ -296,6 +296,7 @@ local state = {
     suppressRemoteVersionWarnings = true,
     showTimestamps = true,
     compactMessages = false,
+    smallMode = false,
     showReadReceipts = true,
     showSystemMessages = true,
     friendNotifications = true,
@@ -430,7 +431,7 @@ function isTiny()
 end
 
 function isPocket()
-    return w < 50 or h < 18
+    return state.smallMode == true or w < 50 or h < 18
 end
 
 function isSmall()
@@ -438,6 +439,7 @@ function isSmall()
 end
 
 function hasSidebar()
+    if state.smallMode == true then return false end
     return w >= 58 and h >= 16
 end
 
@@ -895,6 +897,7 @@ function defaultPrefs()
         suppressRemoteVersionWarnings = true,
         showTimestamps = true,
         compactMessages = false,
+        smallMode = false,
         showReadReceipts = true,
         showSystemMessages = true,
         friendNotifications = true,
@@ -973,6 +976,7 @@ function savePrefs()
         suppressRemoteVersionWarnings = state.suppressRemoteVersionWarnings,
         showTimestamps = state.showTimestamps,
         compactMessages = state.compactMessages,
+        smallMode = state.smallMode,
         showReadReceipts = state.showReadReceipts,
         showSystemMessages = state.showSystemMessages,
         friendNotifications = state.friendNotifications,
@@ -1028,6 +1032,7 @@ function loadPrefs()
     if type(data.suppressRemoteVersionWarnings) ~= "boolean" then data.suppressRemoteVersionWarnings = true end
     if type(data.showTimestamps) ~= "boolean" then data.showTimestamps = true end
     if type(data.compactMessages) ~= "boolean" then data.compactMessages = false end
+    if type(data.smallMode) ~= "boolean" then data.smallMode = false end
     if type(data.showReadReceipts) ~= "boolean" then data.showReadReceipts = true end
     if type(data.showSystemMessages) ~= "boolean" then data.showSystemMessages = true end
     if type(data.friendNotifications) ~= "boolean" then data.friendNotifications = true end
@@ -1082,6 +1087,7 @@ function loadPrefs()
     state.suppressRemoteVersionWarnings = data.suppressRemoteVersionWarnings
     state.showTimestamps = data.showTimestamps
     state.compactMessages = data.compactMessages
+    state.smallMode = data.smallMode
     state.showReadReceipts = data.showReadReceipts
     state.showSystemMessages = data.showSystemMessages
     state.friendNotifications = data.friendNotifications
@@ -3066,7 +3072,7 @@ function cycleDmPrivacy()
     elseif state.dmPrivacy == "friends" then state.dmPrivacy = "none"
     else state.dmPrivacy = "anyone" end
     savePrefs()
-    systemMessage("DM privacy: " .. dmPrivacyLabel() .. ".")
+    systemMessage(sl("DM: " .. dmPrivacyLabel(), "DM privacy: " .. dmPrivacyLabel()) .. ".")
 end
 
 function openSecurityModal()
@@ -4358,6 +4364,7 @@ function drawLogin(registerMode)
     fill(1, 1, w, h, T().bg)
 
     local compact = w < 38 or h < 16
+    state.loginHitboxes = {}
     local titleY = compact and 1 or 2
     center(titleY, APP.name, T().accent, T().bg)
     if not compact and h >= 14 then
@@ -4385,6 +4392,25 @@ function drawLogin(registerMode)
     local inputW = math.max(4, panelW - labelW - 3)
 
     text(panelX + 1, panelY + 1, registerMode and "Create account" or "Welcome back", T().text, T().panel)
+
+    -- LevelOS and a few CC shells can report slightly weird mouse positions around
+    -- text fields. Keep generous row hitboxes so clicking anywhere on the row works.
+    state.loginHitboxes.username = {
+        x = panelX,
+        y = panelY + 3,
+        w = panelW,
+        h = 1,
+        inputX = inputX,
+        inputW = inputW
+    }
+    state.loginHitboxes.password = {
+        x = panelX,
+        y = panelY + 5,
+        w = panelW,
+        h = 1,
+        inputX = inputX,
+        inputW = inputW
+    }
 
     text(panelX + 1, panelY + 3, compact and "User" or "Username", T().muted, T().panel)
     fill(inputX, panelY + 3, inputW, 1, state.focus == "username" and colors.white or T().muted)
@@ -4438,7 +4464,7 @@ function drawLogin(registerMode)
     if state.modal == "error" then
         text(1, h, trim(state.modalInput, w), T().danger, T().bg)
     else
-        text(1, h, trim("TAB field | ENTER continue", w), T().muted, T().bg)
+        text(1, h, trim("TAB field | click row | ENTER continue", w), T().muted, T().bg)
     end
 end
 
@@ -4456,10 +4482,13 @@ end
 function modalHeader(mx, my, mw, title, subtitle, closeAction)
     local th = T()
     fill(mx, my, mw, 1, th.top or th.accent)
-    text(mx + 1, my, trim(title or "", math.max(1, mw - 6)), colors.white, th.top or th.accent)
+
+    local closeW = mw >= 14 and 5 or 3
+    local titleRoom = math.max(1, mw - closeW - 3)
+    text(mx + 1, my, trim(title or "", titleRoom), colors.white, th.top or th.accent)
 
     if mw >= 7 then
-        addButton("modal_x", mx + mw - 2, my, 2, "X", colors.white, th.danger or colors.red, closeAction or closeModal)
+        addButton("modal_x", mx + mw - closeW + 1, my, closeW, closeW >= 5 and "[X]" or "X", colors.white, th.danger or colors.red, closeAction or closeModal)
     end
 
     if subtitle and subtitle ~= "" and my + 1 <= h then
@@ -5033,6 +5062,12 @@ function drawSettingsModal()
     local function onoff(v) return v and "ON" or "OFF" end
     local options = {}
 
+    local compactUi = state.smallMode == true or w < 48
+    local function sl(short, long)
+        if compactUi then return short end
+        return long
+    end
+
     local function addOpt(id, label, active, action, tint)
         table.insert(options, {
             id = id,
@@ -5043,32 +5078,37 @@ function drawSettingsModal()
         })
     end
 
-    addOpt("set_time", "Show message time: " .. onoff(state.showTimestamps ~= false), state.showTimestamps ~= false, function()
+    addOpt("set_smallmode", "Small UI mode: " .. onoff(state.smallMode == true), state.smallMode == true, function()
+        toggleBoolSetting("smallMode", "Small UI mode")
+        state.settingsScroll = 0
+    end, "accent")
+
+    addOpt("set_time", sl("Time: " .. onoff(state.showTimestamps ~= false), "Show message time: " .. onoff(state.showTimestamps ~= false)), state.showTimestamps ~= false, function()
         toggleBoolSetting("showTimestamps", "Show message time")
     end)
 
-    addOpt("set_compact", "Compact messages: " .. onoff(state.compactMessages == true), state.compactMessages == true, function()
+    addOpt("set_compact", sl("Compact: " .. onoff(state.compactMessages == true), "Compact messages: " .. onoff(state.compactMessages == true)), state.compactMessages == true, function()
         toggleBoolSetting("compactMessages", "Compact messages")
     end, "accent")
 
-    addOpt("set_seen", "Show read receipts: " .. onoff(state.showReadReceipts ~= false), state.showReadReceipts ~= false, function()
+    addOpt("set_seen", sl("Seen: " .. onoff(state.showReadReceipts ~= false), "Show read receipts: " .. onoff(state.showReadReceipts ~= false)), state.showReadReceipts ~= false, function()
         toggleBoolSetting("showReadReceipts", "Show read receipts")
     end)
 
-    addOpt("set_system", "Show system messages: " .. onoff(state.showSystemMessages ~= false), state.showSystemMessages ~= false, function()
+    addOpt("set_system", sl("System msg: " .. onoff(state.showSystemMessages ~= false), "Show system messages: " .. onoff(state.showSystemMessages ~= false)), state.showSystemMessages ~= false, function()
         toggleBoolSetting("showSystemMessages", "Show system messages")
     end)
 
-    addOpt("set_slashsystem", "Slash output to local #system: " .. onoff(state.useSystemSlashChannel ~= false), state.useSystemSlashChannel ~= false, function()
+    addOpt("set_slashsystem", sl("Slash -> #system: " .. onoff(state.useSystemSlashChannel ~= false), "Slash output to local #system: " .. onoff(state.useSystemSlashChannel ~= false)), state.useSystemSlashChannel ~= false, function()
         toggleBoolSetting("useSystemSlashChannel", "Slash output to #system")
         ensureSystemChannel()
     end)
 
-    addOpt("set_friendnote", "Friend notifications: " .. onoff(state.friendNotifications ~= false), state.friendNotifications ~= false, function()
+    addOpt("set_friendnote", sl("Friend notes: " .. onoff(state.friendNotifications ~= false), "Friend notifications: " .. onoff(state.friendNotifications ~= false)), state.friendNotifications ~= false, function()
         toggleBoolSetting("friendNotifications", "Friend notifications")
     end)
 
-    addOpt("set_pingnote", "Ping notifications: " .. onoff(state.pingNotifications ~= false), state.pingNotifications ~= false, function()
+    addOpt("set_pingnote", sl("Ping notes: " .. onoff(state.pingNotifications ~= false), "Ping notifications: " .. onoff(state.pingNotifications ~= false)), state.pingNotifications ~= false, function()
         toggleBoolSetting("pingNotifications", "Ping notifications")
     end)
 
@@ -5076,67 +5116,67 @@ function drawSettingsModal()
         toggleBoolSetting("allowAttachments", "Attachments")
     end, "accent")
 
-    addOpt("set_attachnote", "Attachment notifications: " .. onoff(state.attachmentNotifications ~= false), state.attachmentNotifications ~= false, function()
+    addOpt("set_attachnote", sl("File notes: " .. onoff(state.attachmentNotifications ~= false), "Attachment notifications: " .. onoff(state.attachmentNotifications ~= false)), state.attachmentNotifications ~= false, function()
         toggleBoolSetting("attachmentNotifications", "Attachment notifications")
     end)
 
-    addOpt("set_autoplay", "Auto-play received audio: " .. onoff(state.autoPlayAudio == true), state.autoPlayAudio == true, function()
+    addOpt("set_autoplay", sl("Auto-play audio: " .. onoff(state.autoPlayAudio == true), "Auto-play received audio: " .. onoff(state.autoPlayAudio == true)), state.autoPlayAudio == true, function()
         toggleBoolSetting("autoPlayAudio", "Auto-play audio")
     end, state.autoPlayAudio and "warn" or nil)
 
-    addOpt("set_autoclean", "Auto-clean attachments: " .. onoff(state.autoCleanupAttachments ~= false), state.autoCleanupAttachments ~= false, function()
+    addOpt("set_autoclean", sl("Auto-clean files: " .. onoff(state.autoCleanupAttachments ~= false), "Auto-clean attachments: " .. onoff(state.autoCleanupAttachments ~= false)), state.autoCleanupAttachments ~= false, function()
         toggleBoolSetting("autoCleanupAttachments", "Auto-clean attachments")
     end)
 
-    addOpt("set_expire", "Attachment expiry: " .. ((tonumber(state.attachmentExpireDays or 0) or 0) <= 0 and "OFF" or tostring(state.attachmentExpireDays) .. " day(s)"), (tonumber(state.attachmentExpireDays or 0) or 0) > 0, cycleAttachmentExpiry, "accent")
+    addOpt("set_expire", sl("Expire: " .. ((tonumber(state.attachmentExpireDays or 0) or 0) <= 0 and "OFF" or tostring(state.attachmentExpireDays) .. "d"), "Attachment expiry: " .. ((tonumber(state.attachmentExpireDays or 0) or 0) <= 0 and "OFF" or tostring(state.attachmentExpireDays) .. " day(s)")), (tonumber(state.attachmentExpireDays or 0) or 0) > 0, cycleAttachmentExpiry, "accent")
 
-    addOpt("set_storagecap", "Attachment storage cap: " .. ((tonumber(state.attachmentStorageLimitKB or 0) or 0) <= 0 and "OFF" or tostring(state.attachmentStorageLimitKB) .. " KB"), (tonumber(state.attachmentStorageLimitKB or 0) or 0) > 0, cycleAttachmentStorageLimit, "accent")
+    addOpt("set_storagecap", sl("Storage: " .. ((tonumber(state.attachmentStorageLimitKB or 0) or 0) <= 0 and "OFF" or tostring(state.attachmentStorageLimitKB) .. "KB"), "Attachment storage cap: " .. ((tonumber(state.attachmentStorageLimitKB or 0) or 0) <= 0 and "OFF" or tostring(state.attachmentStorageLimitKB) .. " KB")), (tonumber(state.attachmentStorageLimitKB or 0) or 0) > 0, cycleAttachmentStorageLimit, "accent")
 
-    addOpt("set_legattach", "Legacy attachment unsupported note: " .. onoff(state.legacyAttachmentNotice ~= false), state.legacyAttachmentNotice ~= false, function()
+    addOpt("set_legattach", sl("Legacy file note: " .. onoff(state.legacyAttachmentNotice ~= false), "Legacy attachment unsupported note: " .. onoff(state.legacyAttachmentNotice ~= false)), state.legacyAttachmentNotice ~= false, function()
         toggleBoolSetting("legacyAttachmentNotice", "Legacy attachment notice")
     end)
 
-    addOpt("set_cleanaudio", "Clean expired/audio storage now", false, function()
+    addOpt("set_cleanaudio", sl("Clean old/audio files", "Clean expired/audio storage now"), false, function()
         cleanupAttachments("expired", true)
     end, "warn")
 
-    addOpt("set_historysync", "Auto history sync: " .. onoff(state.autoHistorySync ~= false), state.autoHistorySync ~= false, function()
+    addOpt("set_historysync", sl("History sync: " .. onoff(state.autoHistorySync ~= false), "Auto history sync: " .. onoff(state.autoHistorySync ~= false)), state.autoHistorySync ~= false, function()
         toggleBoolSetting("autoHistorySync", "Auto history sync")
     end)
 
-    addOpt("set_dmprivacy", "DM privacy: " .. dmPrivacyLabel(), state.dmPrivacy == "anyone", cycleDmPrivacy, state.dmPrivacy == "anyone" and nil or "warn")
+    addOpt("set_dmprivacy", sl("DM: " .. dmPrivacyLabel(), "DM privacy: " .. dmPrivacyLabel()), state.dmPrivacy == "anyone", cycleDmPrivacy, state.dmPrivacy == "anyone" and nil or "warn")
 
-    addOpt("set_autojoin", "Auto-join public groups: " .. onoff(state.autoJoinPublicGroups ~= false), state.autoJoinPublicGroups ~= false, function()
+    addOpt("set_autojoin", sl("Auto-join groups: " .. onoff(state.autoJoinPublicGroups ~= false), "Auto-join public groups: " .. onoff(state.autoJoinPublicGroups ~= false)), state.autoJoinPublicGroups ~= false, function()
         toggleBoolSetting("autoJoinPublicGroups", "Auto-join public groups")
     end)
 
-    addOpt("set_historyfriends", "History sync friends-only: " .. onoff(state.requireFriendForHistory == true), state.requireFriendForHistory == true, function()
+    addOpt("set_historyfriends", sl("History friends: " .. onoff(state.requireFriendForHistory == true), "History sync friends-only: " .. onoff(state.requireFriendForHistory == true)), state.requireFriendForHistory == true, function()
         toggleBoolSetting("requireFriendForHistory", "History sync friends-only")
     end, state.requireFriendForHistory and "warn" or nil)
 
-    addOpt("set_flood", "Auto-block flood spam: " .. onoff(state.autoBlockFlood == true), state.autoBlockFlood == true, function()
+    addOpt("set_flood", sl("Block floods: " .. onoff(state.autoBlockFlood == true), "Auto-block flood spam: " .. onoff(state.autoBlockFlood == true)), state.autoBlockFlood == true, function()
         toggleBoolSetting("autoBlockFlood", "Auto-block flood spam")
     end, state.autoBlockFlood and "warn" or nil)
 
-    addOpt("set_secalerts", "Security alerts: " .. onoff(state.securityAlerts ~= false), state.securityAlerts ~= false, function()
+    addOpt("set_secalerts", sl("Sec alerts: " .. onoff(state.securityAlerts ~= false), "Security alerts: " .. onoff(state.securityAlerts ~= false)), state.securityAlerts ~= false, function()
         toggleBoolSetting("securityAlerts", "Security alerts")
     end)
 
-    addOpt("set_quiet", state.quietVersionWarnings and "Quiet version spam: ON" or "Quiet version spam: OFF", state.quietVersionWarnings == true, toggleQuietVersionWarnings)
+    addOpt("set_quiet", state.quietVersionWarnings and sl("Quiet ver: ON", "Quiet version spam: ON") or sl("Quiet ver: OFF", "Quiet version spam: OFF"), state.quietVersionWarnings == true, toggleQuietVersionWarnings)
 
-    addOpt("set_old", "Old-client mode: " .. legacyCompatLabel(), shouldAcceptOldClients(), openCompatDropdown, shouldAcceptOldClients() and "warn" or nil)
+    addOpt("set_old", sl("Old mode: " .. legacyCompatLabel(), "Old-client mode: " .. legacyCompatLabel()), shouldAcceptOldClients(), openCompatDropdown, shouldAcceptOldClients() and "warn" or nil)
 
-    addOpt("set_updatenotify", "Notify me when a new update releases: " .. onoff(state.notifyUpdates ~= false), state.notifyUpdates ~= false, function()
+    addOpt("set_updatenotify", sl("Update notes: " .. onoff(state.notifyUpdates ~= false), "Notify me when a new update releases: " .. onoff(state.notifyUpdates ~= false)), state.notifyUpdates ~= false, function()
         toggleBoolSetting("notifyUpdates", "Update release notifications")
     end)
 
-    addOpt("set_update_settings", "Update settings + branch: " .. updateBranchLabel(), false, openUpdateModal, "accent")
+    addOpt("set_update_settings", sl("Updates: " .. updateBranchLabel(), "Update settings + branch: " .. updateBranchLabel()), false, openUpdateModal, "accent")
 
-    addOpt("set_oldtag", "Show [OLD] tags: " .. onoff(state.showOldClientTags ~= false), state.showOldClientTags ~= false, function()
+    addOpt("set_oldtag", sl("[OLD] tags: " .. onoff(state.showOldClientTags ~= false), "Show [OLD] tags: " .. onoff(state.showOldClientTags ~= false)), state.showOldClientTags ~= false, function()
         toggleBoolSetting("showOldClientTags", "Show [OLD] tags")
     end)
 
-    addOpt("set_rwarn", "Hide remote version-warning echoes: " .. onoff(state.suppressRemoteVersionWarnings ~= false), state.suppressRemoteVersionWarnings ~= false, function()
+    addOpt("set_rwarn", sl("Hide ver echoes: " .. onoff(state.suppressRemoteVersionWarnings ~= false), "Hide remote version-warning echoes: " .. onoff(state.suppressRemoteVersionWarnings ~= false)), state.suppressRemoteVersionWarnings ~= false, function()
         toggleBoolSetting("suppressRemoteVersionWarnings", "Hide remote version-warning echoes")
     end)
 
@@ -5304,7 +5344,25 @@ function drawMainMenuModal()
         local item = items[idx]
         if item then
             local label = tostring(item[1] or "")
-            if mw >= 54 and item[5] and item[5] ~= "" then
+            if state.smallMode == true or mw < 42 then
+                local short = {
+                    ["Update Settings + Branch"] = "Updates",
+                    ["Help / Slash Commands"] = "Help",
+                    ["People & Friends"] = "People",
+                    ["Friend Inbox"] = "Inbox",
+                    ["Direct Message"] = "DM",
+                    ["Discover Groups"] = "Discover",
+                    ["Chat Settings"] = "Chat opts",
+                    ["Unpin Current Chat"] = "Unpin chat",
+                    ["Pin Current Chat"] = "Pin chat",
+                    ["Mark All Read"] = "Read all",
+                    ["History Sync"] = "Sync",
+                    ["Security Center"] = "Security",
+                    ["App Controls"] = "App",
+                    ["Close App"] = "Exit"
+                }
+                label = short[label] or label
+            elseif mw >= 54 and item[5] and item[5] ~= "" then
                 local noteRoom = mw - 6 - #label
                 if noteRoom >= 12 then
                     label = label .. "  -  " .. tostring(item[5])
@@ -5541,7 +5599,7 @@ function drawUpdateModal()
     text(mx + 1, my + 4, trim("Local: v" .. appVersion() .. " | Branch source: " .. (state.updateBranchesStatus == "github" and "GitHub API" or "fallback"), mw - 2), colors.gray, colors.lightGray)
 
     addButton("upd_branch_big", mx + 1, my + 6, mw - 2, trim("Choose branch: " .. updateBranchLabel(), mw - 2), colors.black, T().accent, openUpdateBranchDropdown)
-    addButton("upd_notify_big", mx + 1, my + 7, mw - 2, trim("Notify me when a new update releases: " .. onoff(state.notifyUpdates ~= false), mw - 2), colors.black, state.notifyUpdates ~= false and T().good or colors.white, function()
+    addButton("upd_notify_big", mx + 1, my + 7, mw - 2, trim(sl("Update notes: " .. onoff(state.notifyUpdates ~= false), "Notify me when a new update releases: " .. onoff(state.notifyUpdates ~= false)), mw - 2), colors.black, state.notifyUpdates ~= false and T().good or colors.white, function()
         state.notifyUpdates = not state.notifyUpdates
         savePrefs()
         systemMessage("Update release notifications: " .. onoff(state.notifyUpdates ~= false) .. ".", "system")
@@ -5685,21 +5743,21 @@ function drawSecurityModal()
     local function onoff(v) return v and "ON" or "OFF" end
     local y = my + 3
 
-    addButton("sec_dm", mx + 1, y, mw - 2, "DM privacy: " .. dmPrivacyLabel(), colors.black, state.dmPrivacy == "anyone" and colors.white or T().warn, cycleDmPrivacy)
+    addButton("sec_dm", mx + 1, y, mw - 2, sl("DM: " .. dmPrivacyLabel(), "DM privacy: " .. dmPrivacyLabel()), colors.black, state.dmPrivacy == "anyone" and colors.white or T().warn, cycleDmPrivacy)
     y = y + 1
-    addButton("sec_history", mx + 1, y, mw - 2, "History sync friends-only: " .. onoff(state.requireFriendForHistory == true), colors.black, state.requireFriendForHistory and T().warn or colors.white, function()
+    addButton("sec_history", mx + 1, y, mw - 2, sl("History friends: " .. onoff(state.requireFriendForHistory == true), "History sync friends-only: " .. onoff(state.requireFriendForHistory == true)), colors.black, state.requireFriendForHistory and T().warn or colors.white, function()
         toggleBoolSetting("requireFriendForHistory", "History sync friends-only")
     end)
     y = y + 1
-    addButton("sec_autojoin", mx + 1, y, mw - 2, "Auto-join public groups: " .. onoff(state.autoJoinPublicGroups ~= false), colors.black, state.autoJoinPublicGroups ~= false and T().good or colors.white, function()
+    addButton("sec_autojoin", mx + 1, y, mw - 2, sl("Auto-join groups: " .. onoff(state.autoJoinPublicGroups ~= false), "Auto-join public groups: " .. onoff(state.autoJoinPublicGroups ~= false)), colors.black, state.autoJoinPublicGroups ~= false and T().good or colors.white, function()
         toggleBoolSetting("autoJoinPublicGroups", "Auto-join public groups")
     end)
     y = y + 1
-    addButton("sec_flood", mx + 1, y, mw - 2, "Auto-block flood spam: " .. onoff(state.autoBlockFlood == true), colors.black, state.autoBlockFlood and T().warn or colors.white, function()
+    addButton("sec_flood", mx + 1, y, mw - 2, sl("Block floods: " .. onoff(state.autoBlockFlood == true), "Auto-block flood spam: " .. onoff(state.autoBlockFlood == true)), colors.black, state.autoBlockFlood and T().warn or colors.white, function()
         toggleBoolSetting("autoBlockFlood", "Auto-block flood spam")
     end)
     y = y + 1
-    addButton("sec_alerts", mx + 1, y, mw - 2, "Security alerts: " .. onoff(state.securityAlerts ~= false), colors.black, state.securityAlerts ~= false and T().good or colors.white, function()
+    addButton("sec_alerts", mx + 1, y, mw - 2, sl("Sec alerts: " .. onoff(state.securityAlerts ~= false), "Security alerts: " .. onoff(state.securityAlerts ~= false)), colors.black, state.securityAlerts ~= false and T().good or colors.white, function()
         toggleBoolSetting("securityAlerts", "Security alerts")
     end)
     y = y + 1
@@ -6686,6 +6744,19 @@ function handleKey(key)
 end
 
 
+function clickModalCloseZone(x, y)
+    if not state.modal then return false end
+    local b = state.activeModalBox
+    if not b or not b.key then return false end
+    local closeW = b.w >= 14 and 5 or 3
+    local closeStart = b.x + b.w - closeW
+    if y == b.y and x >= closeStart and x <= b.x + b.w - 1 then
+        closeModal()
+        return true
+    end
+    return false
+end
+
 function beginModalDrag(x, y)
     if not state.modal then return false end
     local b = state.activeModalBox
@@ -6693,7 +6764,8 @@ function beginModalDrag(x, y)
 
     -- Every modal/menu can be dragged by its header/title bar.
     -- Leave the right edge alone so the X close button remains easy to click.
-    local closeZoneStart = b.x + b.w - 3
+    local closeW = b.w >= 14 and 5 or 3
+    local closeZoneStart = b.x + b.w - closeW
     if y == b.y and x >= b.x and x <= b.x + b.w - 1 and x < closeZoneStart then
         state.draggingModal = { key = b.key, dx = x - b.x, dy = y - b.y }
         return true
@@ -6721,26 +6793,49 @@ end
 
 function handleMouse(x, y)
     if clickButton(x, y) then return end
+    if clickModalCloseZone(x, y) then return end
     if beginModalDrag(x, y) then return end
 
     if state.screen == "login" or state.screen == "register" then
-        if isPocket() then
-            local panelY = 4
-            if y == panelY + 3 then
-                state.focus = "username"
-            elseif y == panelY + 5 then
-                state.focus = "password"
-            end
+        local boxes = state.loginHitboxes or {}
+
+        local function hitLoginBox(box)
+            if type(box) ~= "table" then return false end
+            local bx = tonumber(box.x) or 1
+            local by = tonumber(box.y) or 1
+            local bw = tonumber(box.w) or w
+            local bh = tonumber(box.h) or 1
+
+            -- Be intentionally forgiving for LevelOS-style shells. The password field
+            -- bug was usually a stale/hardcoded hitbox, and sometimes a one-cell
+            -- coordinate offset. This lets the whole row, plus a tiny vertical cushion,
+            -- focus the field.
+            return x >= bx and x <= bx + bw - 1 and y >= by - 1 and y <= by + bh
+        end
+
+        if hitLoginBox(boxes.username) then
+            state.focus = "username"
+            return
+        elseif hitLoginBox(boxes.password) then
+            state.focus = "password"
             return
         end
 
-        local panelH = 12
-        local panelY = math.max(5, math.floor((h - panelH) / 2) + 1)
+        -- Fallback if a shell fails to preserve the current hitboxes after resize.
+        local compact = w < 38 or h < 16
+        local panelW = math.min(compact and w or 42, math.max(1, w - (compact and 0 or 4)))
+        local panelH = compact and math.min(10, h - 2) or math.min(12, h - 5)
+        if panelH < 8 then panelH = math.min(h, 8) end
+        local panelX = math.floor((w - panelW) / 2) + 1
+        local panelY = compact and math.max(2, math.floor((h - panelH) / 2) + 1) or math.max(5, math.floor((h - panelH) / 2) + 1)
+        if panelY + panelH - 1 > h then panelY = math.max(1, h - panelH + 1) end
 
-        if y == panelY + 3 then
-            state.focus = "username"
-        elseif y == panelY + 5 then
-            state.focus = "password"
+        if x >= panelX and x <= panelX + panelW - 1 then
+            if y >= panelY + 2 and y <= panelY + 3 then
+                state.focus = "username"
+            elseif y >= panelY + 4 and y <= panelY + 6 then
+                state.focus = "password"
+            end
         end
         return
     end

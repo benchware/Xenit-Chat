@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "20.0.7",
+    version = "20.0.9",
     protocolVersion = 19,
     protocolName = "Aegis",
     protocol = "xenitchat_bus",
@@ -650,6 +650,12 @@ local function protocolVersion()
     return tonumber(APP.protocolVersion or APP.version) or 0
 end
 
+-- Shared ON/OFF label helper. Keep this global-ish (not nested in Settings)
+-- because Update/Security/Settings modals all use it.
+function onoff(value)
+    return value and "ON" or "OFF"
+end
+
 local function parseVersionParts(value)
     local parts = {}
     value = tostring(value or "0")
@@ -859,6 +865,7 @@ local function defaultPrefs()
     return {
         remember = true,
         username = nil,
+        rememberedUsername = nil,
         theme = "midnight",
         profile = {
             display = "",
@@ -924,9 +931,25 @@ local function defaultPrefs()
 end
 
 local function savePrefs()
+    local existingPrefs = readSerialized(APP.prefsFile, {})
+    local rememberedUsername = nil
+
+    if state.remember then
+        rememberedUsername = state.username
+
+        if (not rememberedUsername or rememberedUsername == "") and state.screen == "login" then
+            rememberedUsername = state.input
+        end
+
+        if not rememberedUsername or rememberedUsername == "" then
+            rememberedUsername = existingPrefs.username or existingPrefs.rememberedUsername
+        end
+    end
+
     local data = {
         remember = state.remember,
-        username = state.remember and state.username or nil,
+        username = rememberedUsername,
+        rememberedUsername = rememberedUsername,
         theme = state.theme,
         profile = state.profile,
         friends = state.friends,
@@ -1027,9 +1050,15 @@ local function loadPrefs()
     if type(data.muted) ~= "table" then data.muted = {} end
     if type(data.trusted) ~= "table" then data.trusted = {} end
     if type(data.knownIdentities) ~= "table" then data.knownIdentities = {} end
+    if type(data.rememberedUsername) ~= "string" then data.rememberedUsername = data.username end
+    if type(data.username) ~= "string" then data.username = data.rememberedUsername end
     if type(data.profile) ~= "table" then data.profile = { display = "", status = "Available" } end
 
     state.remember = data.remember ~= false
+    state.rememberedUsername = data.username or data.rememberedUsername
+    if state.screen == "login" and state.rememberedUsername and state.rememberedUsername ~= "" then
+        state.input = state.rememberedUsername
+    end
     state.theme = THEMES[data.theme] and data.theme or "midnight"
     state.profile = data.profile
     state.friends = data.friends
@@ -3546,15 +3575,15 @@ COMMAND_HELP = {
             { cmd = "/audio", args = "path.dfpwm", desc = "Send an audio attachment. DFPWM plays best on speaker peripherals." },
             { cmd = "/play", args = "path", desc = "Play a local/received DFPWM audio file through a speaker." },
             { cmd = "/attachments", desc = "Show received attachment folder and recent transfer info.", aliases = {"/files"} },
-            { cmd = "/cleanattachments", args = "[expired|audio|all]", desc = "Clear expired attachments, audio files, or every received attachment." }
+            { cmd = "/cleanattachments", args = "[expired|audio|all]", desc = "Clean received attachment storage." }
         }
     },
     {
         title = "System",
         items = {
             { cmd = "/sync", desc = "Request chat history sync.", aliases = {"/history"} },
-            { cmd = "/update", args = "[check|install|force|branch <name>]", desc = "Check/install GitHub update from selected branch and scan branch metadata." },
-            { cmd = "/branch", args = "[name|refresh]", desc = "Choose or refresh GitHub branches for updater." },
+            { cmd = "/update", args = "[check|install|force]", desc = "Check or install GitHub updates." },
+            { cmd = "/branch", args = "[name|refresh]", desc = "Pick or refresh update branches." },
             { cmd = "/version", desc = "Show app/protocol version.", aliases = {"/about"} },
             { cmd = "/compat", desc = "Cycle old-client target: Generic, v15, v18, v7, v19 plain. BUGGY.", aliases = {"/legacy", "/oldclients"} },
             { cmd = "/quiet", desc = "Toggle version warning noise filter." },
@@ -4143,40 +4172,49 @@ end
 local function tryRememberLogin()
     if not state.remember then return false end
 
-    local username = readSerialized(APP.prefsFile, {}).username
+    local prefs = readSerialized(APP.prefsFile, {})
+    local username = prefs.username or prefs.rememberedUsername or state.rememberedUsername
 
-    if not username then return false end
+    if not username or username == "" then return false end
 
     local accounts = loadAccounts()
     local account = accounts[username]
 
-    if not account then return false end
+    if not account then
+        state.input = username
+        return false
+    end
 
     local ok = verifyAccount(username, account)
 
-    if not ok then return false end
+    if not ok then
+        state.input = username
+        return false
+    end
 
     finishLogin(username, account, true)
     return true
 end
 
 function logout()
+    local lastUsername = state.username or state.rememberedUsername or ""
+
     state.username = nil
     state.publicId = nil
     state.screen = "login"
-    state.focus = "username"
-    state.input = ""
+    state.focus = state.remember and "password" or "username"
+    state.input = state.remember and lastUsername or ""
     state.password = ""
     state.modal = nil
     state.modalInput = ""
 
-    if not state.remember then
-        savePrefs()
+    if state.remember then
+        state.rememberedUsername = lastUsername
     else
-        local data = readSerialized(APP.prefsFile, defaultPrefs())
-        data.username = nil
-        writeSerialized(APP.prefsFile, data)
+        state.rememberedUsername = nil
     end
+
+    savePrefs()
 end
 
 function openAppControls()
@@ -4346,6 +4384,11 @@ local function drawLogin(registerMode)
     if rememberY <= panelY + panelH - 1 then
         addButton("remember", panelX + 1, rememberY, panelW - 2, state.remember and "Remember: ON" or "Remember: OFF", colors.black, state.remember and T().accent or T().muted, function()
             state.remember = not state.remember
+            if state.remember and state.input and state.input ~= "" then
+                state.rememberedUsername = state.input
+            elseif not state.remember then
+                state.rememberedUsername = nil
+            end
             savePrefs()
         end)
     end
@@ -5324,10 +5367,23 @@ local function drawHelpModal()
         local cat = COMMAND_HELP[state.helpPage - 1]
         table.insert(lines, tostring(cat.title or "Commands"))
         table.insert(lines, string.rep("-", math.min(24, mw - 2)))
+
+        -- Pages near the end were too dense on small screens. Keep them command-only
+        -- and move detail into /help <command>, which is cleaner than wrapping.
+        local compactPage = (cat.title == "Attachments" or cat.title == "System")
+        if compactPage then
+            table.insert(lines, "Use /help <command> for details.")
+            table.insert(lines, "")
+        end
+
         for _, item in ipairs(cat.items or {}) do
             local args = item.args and (" " .. item.args) or ""
-            table.insert(lines, item.cmd .. args)
-            table.insert(lines, "  " .. tostring(item.desc or ""))
+            if compactPage then
+                table.insert(lines, item.cmd .. args)
+            else
+                table.insert(lines, item.cmd .. args)
+                table.insert(lines, "  " .. tostring(item.desc or ""))
+            end
         end
     end
 

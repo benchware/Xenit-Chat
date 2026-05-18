@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "21.0.3",
+    version = "21.0.4",
     protocolVersion = 20,
     protocolName = "Oxygen",
     protocol = "xenitchat_bus",
@@ -308,7 +308,7 @@ local state = {
     allowAttachments = true,
     autoPlayAudio = false,
     autoHistorySync = true,
-    historySyncMode = "manual_no_relays",
+    historySyncMode = "startup_relays_once",
     historyRequestTickets = {},
     relayStartupSynced = {},
     p2pRelayMode = false,
@@ -993,7 +993,7 @@ function isValidHistorySyncMode(mode)
 end
 
 function historySyncModeLabel(mode)
-    return SYNC_MODE_LABELS[tostring(mode or state.historySyncMode or "manual_no_relays")] or SYNC_MODE_LABELS.manual_no_relays
+    return SYNC_MODE_LABELS[tostring(mode or state.historySyncMode or "startup_relays_once")] or SYNC_MODE_LABELS.manual_no_relays
 end
 
 function peerInfoFor(publicId, msg)
@@ -1012,7 +1012,7 @@ function peerInfoFor(publicId, msg)
 end
 
 function historyModeAllowsSource(info, manual)
-    local mode = state.historySyncMode or "manual_no_relays"
+    local mode = state.historySyncMode or "startup_relays_once"
     info = info or {}
 
     -- Outdated relays are blocked unless an explicit DANGER mode is selected.
@@ -1077,7 +1077,7 @@ function hasRecentHistoryRequest(publicId)
 end
 
 function cycleHistorySyncMode()
-    local cur = state.historySyncMode or "manual_no_relays"
+    local cur = state.historySyncMode or "startup_relays_once"
     local nextMode = SYNC_MODE_ORDER[1]
     for i, mode in ipairs(SYNC_MODE_ORDER) do
         if mode == cur then
@@ -1270,7 +1270,7 @@ function defaultPrefs()
         legacyAttachmentNotice = true,
         attachmentLog = {},
         autoHistorySync = true,
-        historySyncMode = "manual_no_relays",
+        historySyncMode = "startup_relays_once",
         clearEpoch = {},
         p2pRelayMode = false,
         authSync = true,
@@ -1415,8 +1415,8 @@ function loadPrefs()
     if type(data.legacyAttachmentNotice) ~= "boolean" then data.legacyAttachmentNotice = true end
     if type(data.attachmentLog) ~= "table" then data.attachmentLog = {} end
     if type(data.autoHistorySync) ~= "boolean" then data.autoHistorySync = true end
-    if type(data.historySyncMode) ~= "string" then data.historySyncMode = "manual_no_relays" end
-    if not isValidHistorySyncMode or not isValidHistorySyncMode(data.historySyncMode) then data.historySyncMode = "manual_no_relays" end
+    if type(data.historySyncMode) ~= "string" then data.historySyncMode = "startup_relays_once" end
+    if not isValidHistorySyncMode or not isValidHistorySyncMode(data.historySyncMode) then data.historySyncMode = "startup_relays_once" end
     if type(data.clearEpoch) ~= "table" then data.clearEpoch = {} end
     if type(data.p2pRelayMode) ~= "boolean" then data.p2pRelayMode = false end
     if type(data.authSync) ~= "boolean" then data.authSync = true end

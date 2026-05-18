@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "21.0.1",
+    version = "21.0.2",
     protocolVersion = 20,
     protocolName = "Oxygen",
     protocol = "xenitchat_bus",
@@ -270,6 +270,7 @@ local state = {
     packetSeenOrder = {},
     messageSeen = {},
     historySyncLast = {},
+    clearEpoch = {},
     versionNoticeLast = {},
     pinned = {},
     quietVersionWarnings = true,
@@ -970,7 +971,7 @@ function requestRelaySync(senderId, publicId)
     state.relayLastSync[publicId] = now
     safeSendTo(senderId, "relay_sync_request", {
         wantAuth = true,
-        wantHistory = true,
+        wantHistory = true, clearEpoch = state.clearEpoch or {},
         knownAuthRevision = (loadAuthStore().revision or 0)
     })
 end
@@ -1135,6 +1136,7 @@ function defaultPrefs()
         legacyAttachmentNotice = true,
         attachmentLog = {},
         autoHistorySync = true,
+        clearEpoch = {},
         p2pRelayMode = false,
         authSync = true,
         dmPrivacy = "anyone",
@@ -1216,6 +1218,7 @@ function savePrefs()
         legacyAttachmentNotice = state.legacyAttachmentNotice,
         attachmentLog = state.attachmentLog,
         autoHistorySync = state.autoHistorySync,
+        clearEpoch = state.clearEpoch,
         p2pRelayMode = state.p2pRelayMode,
         authSync = state.authSync,
         dmPrivacy = state.dmPrivacy,
@@ -1276,6 +1279,7 @@ function loadPrefs()
     if type(data.legacyAttachmentNotice) ~= "boolean" then data.legacyAttachmentNotice = true end
     if type(data.attachmentLog) ~= "table" then data.attachmentLog = {} end
     if type(data.autoHistorySync) ~= "boolean" then data.autoHistorySync = true end
+    if type(data.clearEpoch) ~= "table" then data.clearEpoch = {} end
     if type(data.p2pRelayMode) ~= "boolean" then data.p2pRelayMode = false end
     if type(data.authSync) ~= "boolean" then data.authSync = true end
     if data.dmPrivacy ~= "friends" and data.dmPrivacy ~= "none" then data.dmPrivacy = "anyone" end
@@ -1331,6 +1335,7 @@ function loadPrefs()
     state.legacyAttachmentNotice = data.legacyAttachmentNotice
     state.attachmentLog = data.attachmentLog
     state.autoHistorySync = data.autoHistorySync
+    state.clearEpoch = data.clearEpoch
     state.p2pRelayMode = data.p2pRelayMode
     state.authSync = data.authSync
     if type(state.authLookupPending) ~= "table" then state.authLookupPending = {} end
@@ -1476,6 +1481,24 @@ function hasMessage(key, msgId)
     return key and msgId and state.messageSeen[key] and state.messageSeen[key][msgId]
 end
 
+function messageWasCleared(key, epoch)
+    if not key then return false end
+    local clearAt = state.clearEpoch and tonumber(state.clearEpoch[key])
+    if not clearAt then return false end
+    local msgEpoch = tonumber(epoch or 0) or 0
+    if msgEpoch <= 0 then
+        -- Unknown timestamps are treated as old, so cleared chats do not re-import legacy history.
+        return true
+    end
+    return msgEpoch <= clearAt
+end
+
+function markChatCleared(key)
+    if not key or key == "" then return end
+    state.clearEpoch = state.clearEpoch or {}
+    state.clearEpoch[key] = os.time()
+end
+
 function rebuildMessageSeen()
     state.messageSeen = {}
 
@@ -1610,6 +1633,7 @@ saveHistory = function()
     local data = {
         version = appVersion(),
         savedAt = os.time(),
+        clearEpoch = state.clearEpoch or {},
         messages = {},
         convos = {}
     }
@@ -1653,6 +1677,15 @@ function loadHistory()
         return
     end
 
+    if type(data.clearEpoch) == "table" then
+        state.clearEpoch = state.clearEpoch or {}
+        for key, epoch in pairs(data.clearEpoch) do
+            if tonumber(epoch) and ((not state.clearEpoch[key]) or tonumber(epoch) > tonumber(state.clearEpoch[key] or 0)) then
+                state.clearEpoch[key] = tonumber(epoch)
+            end
+        end
+    end
+
     if type(data.convos) == "table" then
         for key, c in pairs(data.convos) do
             if type(c) == "table" and key ~= "global" and not state.convos[key] then
@@ -1669,7 +1702,7 @@ function loadHistory()
             end
 
             for _, m in ipairs(list) do
-                if type(m) == "table" and m.body then
+                if type(m) == "table" and m.body and not messageWasCleared(key, m.epoch) then
                     addMessage(key, m.from, m.body, m.kind, {
                         msgId = m.msgId,
                         fromId = m.fromId,
@@ -1705,7 +1738,7 @@ function historyKeysForPeer(publicId)
     return keys
 end
 
-function makeHistoryBundle(keys, requesterPublicId)
+function makeHistoryBundle(keys, requesterPublicId, requesterClearEpoch)
     local bundles = {}
 
     for _, key in ipairs(keys or {}) do
@@ -1713,21 +1746,27 @@ function makeHistoryBundle(keys, requesterPublicId)
             local list = state.messages[key] or {}
             local out = {}
             local startAt = math.max(1, #list - APP.historySyncLimit + 1)
+            local remoteClearAt = requesterClearEpoch and tonumber(requesterClearEpoch[key])
 
             for i = startAt, #list do
                 local m = list[i]
+
                 if type(m) == "table" and m.kind ~= "system" and m.body then
-                    table.insert(out, {
-                        from = m.from,
-                        body = m.body,
-                        kind = m.kind,
-                        time = m.time,
-                        epoch = m.epoch,
-                        msgId = m.msgId,
-                        fromId = m.fromId,
-                        outgoing = false,
-                        seen = m.seen
-                    })
+                    local mEpoch = tonumber(m.epoch or 0) or 0
+
+                    if not (remoteClearAt and mEpoch > 0 and mEpoch <= remoteClearAt) then
+                        table.insert(out, {
+                            from = m.from,
+                            body = m.body,
+                            kind = m.kind,
+                            time = m.time,
+                            epoch = m.epoch,
+                            msgId = m.msgId,
+                            fromId = m.fromId,
+                            outgoing = false,
+                            seen = m.seen
+                        })
+                    end
                 end
             end
 
@@ -1773,7 +1812,7 @@ function importHistoryBundles(bundles, senderPublicId)
                 ensureConvo(key, bundle.title or key, bundle.type or "public", bundle.private or false, bundle.listed ~= false, bundle.owner or "history", bundle.type == "pm" and senderPublicId or bundle.peerId)
 
                 for _, m in ipairs(bundle.messages) do
-                    if type(m) == "table" and m.body then
+                    if type(m) == "table" and m.body and not messageWasCleared(key, m.epoch) then
                         local added = addMessage(key, m.from, m.body, m.kind, {
                             msgId = m.msgId,
                             fromId = m.fromId or senderPublicId,
@@ -1808,7 +1847,8 @@ function requestHistorySync(senderId, publicId)
     state.historySyncLast[publicId] = now
 
     safeSendTo(senderId, "history_request", {
-        keys = historyKeysForPeer(publicId)
+        keys = historyKeysForPeer(publicId),
+        clearEpoch = state.clearEpoch or {}
     })
 end
 
@@ -2146,16 +2186,30 @@ function openChatsModal()
 end
 
 function clearCurrentChat()
-    if state.current and state.messages[state.current] then
-        state.messages[state.current] = {}
-        if state.messageSeen then state.messageSeen[state.current] = {} end
-        systemMessage("Chat history cleared locally.", state.current)
-        if saveHistory then saveHistory() end
+    if not state.current then return end
+
+    local key = state.current
+    ensureConvo(key, key, "public", false, true, "unknown")
+    markChatCleared(key)
+    state.messages[key] = {}
+    if state.messageSeen then state.messageSeen[key] = {} end
+    if state.convos[key] then
+        state.convos[key].unread = 0
+        state.convos[key].last = os.time()
+    end
+
+    if saveHistory then saveHistory() end
+    savePrefs()
+
+    if key ~= "system" then
+        ensureSystemChannel()
+        addMessage("system", "system", "Cleared #" .. tostring(key) .. ". Older synced history for this chat is now ignored.", "system", { skipSave = true })
     end
 end
 
 function clearSystemChannel(showNotice)
     ensureSystemChannel()
+    markChatCleared("system")
     state.messages.system = {}
     if state.messageSeen then state.messageSeen.system = {} end
     if state.convos.system then
@@ -6538,7 +6592,7 @@ end
 function handleNetHistoryRequest(senderId, msg)
     if shouldShareHistoryWith(msg.publicId) then
         safeSendTo(senderId, "history_reply", {
-            bundles = makeHistoryBundle(msg.keys or {}, msg.publicId)
+            bundles = makeHistoryBundle(msg.keys or {}, msg.publicId, msg.clearEpoch)
         })
     elseif state.securityAlerts ~= false then
         recordSecurityEvent("Blocked history sync request from non-friend #" .. shortId(msg.publicId) .. ".")
@@ -6729,7 +6783,7 @@ function handleNetRelaySyncRequest(senderId, msg)
         payload.auth = loadAuthStore().accounts or {}
     end
     if msg.wantHistory == true then
-        payload.bundles = makeHistoryBundle(historyKeysForPeer(msg.publicId), msg.publicId)
+        payload.bundles = makeHistoryBundle(historyKeysForPeer(msg.publicId), msg.publicId, msg.clearEpoch)
     end
     safeSendTo(senderId, "relay_sync_reply", payload)
 end

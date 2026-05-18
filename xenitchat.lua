@@ -4,7 +4,7 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "20.0.9",
+    version = "20.0.10",
     protocolVersion = 19,
     protocolName = "Aegis",
     protocol = "xenitchat_bus",
@@ -287,6 +287,7 @@ local state = {
     notifyUpdates = true,
     updateMetaCache = {},
     updateMetaOrder = {},
+    updateMetaScroll = 0,
     updateLastScan = {},
     helpPage = 1,
     slashOpenedSystemOutput = false,
@@ -5507,19 +5508,40 @@ local function drawUpdateModal()
     local y = my + 9
     text(mx + 1, y, trim("Known remote versions:", mw - 2), T().top, colors.lightGray)
     y = y + 1
+
     local metaLines = updateMetaSummaryLines()
-    local maxMeta = math.max(2, mh - 15)
+    local metaTop = y
+    local metaRows = math.max(2, mh - 15)
+    local maxMetaScroll = math.max(0, #metaLines - metaRows)
+    state.updateMetaScroll = tonumber(state.updateMetaScroll) or 0
+    if state.updateMetaScroll < 0 then state.updateMetaScroll = 0 end
+    if state.updateMetaScroll > maxMetaScroll then state.updateMetaScroll = maxMetaScroll end
+
+    fill(mx + 1, metaTop, mw - 2, metaRows, colors.white)
+
     if #metaLines == 0 then
-        text(mx + 2, y, trim("No metadata yet. Press Check or Refresh Branches.", mw - 4), colors.gray, colors.lightGray)
-        y = y + 1
+        text(mx + 2, metaTop, trim("No metadata yet. Press Check or Refresh.", mw - 4), colors.gray, colors.white)
     else
-        for i = 1, math.min(#metaLines, maxMeta) do
-            text(mx + 2, y, trim(metaLines[i], mw - 4), colors.gray, colors.lightGray)
-            y = y + 1
+        for row = 1, metaRows do
+            local idx = state.updateMetaScroll + row
+            local line = metaLines[idx]
+            if line then
+                local prefix = "  "
+                if idx == 1 and state.updateMetaScroll > 0 then prefix = "^ " end
+                if idx == #metaLines and state.updateMetaScroll < maxMetaScroll then prefix = "v " end
+                text(mx + 2, metaTop + row - 1, trim(prefix .. line, mw - 6), colors.gray, colors.white)
+            end
         end
-        if #metaLines > maxMeta then
-            text(mx + 2, y, trim("...and " .. tostring(#metaLines - maxMeta) .. " more branch result(s)", mw - 4), colors.gray, colors.lightGray)
-            y = y + 1
+
+        if #metaLines > metaRows then
+            local info = tostring(state.updateMetaScroll + 1) .. "-" .. tostring(math.min(#metaLines, state.updateMetaScroll + metaRows)) .. "/" .. tostring(#metaLines)
+            text(mx + mw - #info - 1, my + 9, info, colors.gray, colors.lightGray)
+            addButton("upd_meta_up", mx + mw - 6, metaTop + metaRows - 1, 2, "^", colors.white, colors.gray, function()
+                state.updateMetaScroll = math.max(0, (state.updateMetaScroll or 0) - 3)
+            end)
+            addButton("upd_meta_down", mx + mw - 3, metaTop + metaRows - 1, 2, "v", colors.white, colors.gray, function()
+                state.updateMetaScroll = math.min(maxMetaScroll, (state.updateMetaScroll or 0) + 3)
+            end)
         end
     end
 
@@ -6543,6 +6565,21 @@ local function handleKey(key)
         return
     end
 
+    if state.modal == "update" then
+        if key == keys.up then
+            state.updateMetaScroll = math.max(0, (state.updateMetaScroll or 0) - 1)
+        elseif key == keys.down then
+            state.updateMetaScroll = (state.updateMetaScroll or 0) + 1
+        elseif key == keys.pageUp then
+            state.updateMetaScroll = math.max(0, (state.updateMetaScroll or 0) - 5)
+        elseif key == keys.pageDown then
+            state.updateMetaScroll = (state.updateMetaScroll or 0) + 5
+        elseif key == keys.home then
+            state.updateMetaScroll = 0
+        end
+        return
+    end
+
     if state.modal == "compat_dropdown" then
         if key == keys.up then
             state.compatScroll = math.max(0, (state.compatScroll or 0) - 1)
@@ -6707,6 +6744,12 @@ local function uiLoop()
                     state.branchScroll = math.max(0, (state.branchScroll or 0) - 3)
                 else
                     state.branchScroll = (state.branchScroll or 0) + 3
+                end
+            elseif state.modal == "update" then
+                if p1 < 0 then
+                    state.updateMetaScroll = math.max(0, (state.updateMetaScroll or 0) - 3)
+                else
+                    state.updateMetaScroll = (state.updateMetaScroll or 0) + 3
                 end
             elseif state.screen == "chat" and not state.modal then
                 if p1 < 0 then

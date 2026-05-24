@@ -4,9 +4,9 @@
 local APP = {
     name = "XenitChat",
     slogan = "Connecting people",
-    version = "21.0.5",
-    protocolVersion = 20,
-    protocolName = "Oxygen",
+    version = "21.1.1",
+    protocolVersion = 21,
+    protocolName = "Powder",
     protocol = "xenitchat_bus",
     updateUrl = "https://raw.githubusercontent.com/benchware/Xenit-Chat/main/xenitchat.lua",
     updateOwner = "benchware",
@@ -23,7 +23,9 @@ local APP = {
     maxMessages = 350,
     messageLimit = 200,
     historySyncLimit = 80,
-    historySyncCooldown = 12,
+    historySyncCooldown = 8,
+    historyRequestTTL = 90,
+    historyKnownIdLimit = 160,
     relaySyncCooldown = 10,
     versionNoticeCooldown = 90,
     maxPacketBytes = 12000,
@@ -310,6 +312,9 @@ local state = {
     autoHistorySync = true,
     historySyncMode = "startup_relays_once",
     historyRequestTickets = {},
+    historyRequestMeta = {},
+    deletedMessageIds = {},
+    syncGeneration = 0,
     relayStartupSynced = {},
     p2pRelayMode = false,
     authSync = true,
@@ -733,10 +738,13 @@ LEGACY_COMPAT_MODES = {
     v18 = { label = "Known v18 mirror (BUGGY)", target = 18, plain = true, accept = true },
     v19_plain = { label = "v19 plain/no codename (BUGGY)", target = 19, plain = true, accept = true },
     v19_quartz = { label = "Quartz v19 legacy (BUGGY)", target = 19, plain = false, accept = true, protocolName = "Quartz" },
-    v20_aegis = { label = "Oxygen v20 legacy (BUGGY)", target = 19, plain = false, accept = true, protocolName = "Aegis" }
+    v20_aegis = { label = "Aegis v20 legacy (BUGGY)", target = 20, plain = false, accept = true, protocolName = "Aegis" },
+    v20_oxygen = { label = "Oxygen v20 legacy (BUGGY)", target = 20, plain = false, accept = true, protocolName = "Oxygen" },
+    v21_oxygensync = { label = "OxygenSync v21 legacy", target = 21, plain = false, accept = true, protocolName = "OxygenSync" },
+    v21_powder = { label = "Powder v21 plain", target = 21, plain = false, accept = true, protocolName = "Powder" }
 }
 
-LEGACY_COMPAT_ORDER = { "off", "accept", "generic", "v15", "v18", "v17", "v16", "v14", "v12", "v10", "v8", "v7", "v19_plain", "v19_quartz", "v20_aegis" }
+LEGACY_COMPAT_ORDER = { "off", "accept", "generic", "v15", "v18", "v17", "v16", "v14", "v12", "v10", "v8", "v7", "v19_plain", "v19_quartz", "v20_aegis", "v20_oxygen", "v21_oxygensync" }
 
 function legacyCompatInfo()
     return LEGACY_COMPAT_MODES[state.legacyCompatMode or "accept"] or LEGACY_COMPAT_MODES.accept
@@ -770,7 +778,7 @@ end
 function shouldMirrorForLegacy(kind)
     local v = legacyMirrorVersion()
     if not v then return false end
-    if v == protocolVersion() and state.legacyCompatMode ~= "v19_plain" and state.legacyCompatMode ~= "v19_quartz" and state.legacyCompatMode ~= "v20_aegis" then return false end
+    if v == protocolVersion() and state.legacyCompatMode ~= "v19_plain" and state.legacyCompatMode ~= "v19_quartz" and state.legacyCompatMode ~= "v20_aegis" and state.legacyCompatMode ~= "v20_oxygen" and state.legacyCompatMode ~= "v21_oxygensync" then return false end
     return kind == "hello" or kind == "hello_ack" or kind == "chat" or kind == "pm" or kind == "read" or kind == "channel_create" or kind == "channel_rename" or kind == "join" or kind == "friend_request" or kind == "friend_accept" or kind == "friend_decline" or kind == "friend_cancel" or kind == "unfriend"
 end
 
@@ -1062,21 +1070,44 @@ function shouldManualHistorySyncFrom(publicId, u)
     return historyModeAllowsSource(peerInfoFor(publicId, u), true)
 end
 
-function noteHistoryRequest(publicId)
-    if not publicId then return end
-    state.historyRequestTickets = state.historyRequestTickets or {}
-    state.historyRequestTickets[publicId] = os.clock()
+function makeSyncRequestId(publicId)
+    return "sync-" .. tostring(os.getComputerID()) .. "-" .. tostring(shortId(publicId or "peer")) .. "-" .. tostring(os.time()) .. "-" .. randomToken(6)
 end
 
-function hasRecentHistoryRequest(publicId)
+function noteHistoryRequest(publicId, requestId, sourceKind)
+    if not publicId then return nil end
+    state.historyRequestTickets = state.historyRequestTickets or {}
+    state.historyRequestMeta = state.historyRequestMeta or {}
+    requestId = requestId or makeSyncRequestId(publicId)
+    state.historyRequestTickets[publicId] = os.clock()
+    state.historyRequestMeta[publicId] = {
+        id = requestId,
+        source = sourceKind or "peer",
+        generation = state.syncGeneration or 0,
+        created = os.clock()
+    }
+    return requestId
+end
+
+function hasRecentHistoryRequest(publicId, requestId)
     if not publicId then return false end
     local t = state.historyRequestTickets and state.historyRequestTickets[publicId]
-    if not t then return false end
-    if os.clock() - t > 60 then
+    local meta = state.historyRequestMeta and state.historyRequestMeta[publicId]
+    if not t or not meta then return false end
+    if os.clock() - t > (APP.historyRequestTTL or 90) then
         state.historyRequestTickets[publicId] = nil
+        state.historyRequestMeta[publicId] = nil
         return false
     end
+    if requestId and meta.id and tostring(requestId) ~= tostring(meta.id) then return false end
+    if tonumber(meta.generation or 0) ~= tonumber(state.syncGeneration or 0) then return false end
     return true
+end
+
+function finishHistoryRequest(publicId)
+    if not publicId then return end
+    if state.historyRequestTickets then state.historyRequestTickets[publicId] = nil end
+    if state.historyRequestMeta then state.historyRequestMeta[publicId] = nil end
 end
 
 function cycleHistorySyncMode()
@@ -1105,10 +1136,20 @@ function requestRelaySync(senderId, publicId, wantHistory)
     local now = os.clock()
     if state.relayLastSync[publicId] and now - state.relayLastSync[publicId] < APP.relaySyncCooldown then return end
     state.relayLastSync[publicId] = now
-    if wantHistory == true then noteHistoryRequest(publicId) end
+    local keys = historyKeysForPeer(publicId)
+    local reqId = nil
+    if wantHistory == true then reqId = noteHistoryRequest(publicId, nil, "relay") end
     safeSendTo(senderId, "relay_sync_request", {
+        syncVersion = 2,
+        requestId = reqId,
         wantAuth = true,
-        wantHistory = wantHistory == true, clearEpoch = state.clearEpoch or {},
+        wantHistory = wantHistory == true,
+        keys = keys,
+        clearEpoch = state.clearEpoch or {},
+        deletedIds = state.deletedMessageIds or {},
+        knownIds = makeKnownMessageIds(keys),
+        watermarks = makeHistoryWatermarks(keys),
+        syncGeneration = state.syncGeneration or 0,
         knownAuthRevision = (loadAuthStore().revision or 0)
     })
 end
@@ -1277,6 +1318,8 @@ function defaultPrefs()
         autoHistorySync = true,
         historySyncMode = "startup_relays_once",
         clearEpoch = {},
+        deletedMessageIds = {},
+        syncGeneration = 0,
         p2pRelayMode = false,
         authSync = true,
         dmPrivacy = "anyone",
@@ -1371,6 +1414,8 @@ function savePrefs()
         autoHistorySync = state.autoHistorySync,
         historySyncMode = state.historySyncMode,
         clearEpoch = state.clearEpoch,
+        deletedMessageIds = state.deletedMessageIds,
+        syncGeneration = state.syncGeneration,
         p2pRelayMode = state.p2pRelayMode,
         authSync = state.authSync,
         dmPrivacy = state.dmPrivacy,
@@ -1434,6 +1479,8 @@ function loadPrefs()
     if type(data.historySyncMode) ~= "string" then data.historySyncMode = "startup_relays_once" end
     if not isValidHistorySyncMode or not isValidHistorySyncMode(data.historySyncMode) then data.historySyncMode = "startup_relays_once" end
     if type(data.clearEpoch) ~= "table" then data.clearEpoch = {} end
+    if type(data.deletedMessageIds) ~= "table" then data.deletedMessageIds = {} end
+    if tonumber(data.syncGeneration) == nil then data.syncGeneration = 0 end
     if type(data.p2pRelayMode) ~= "boolean" then data.p2pRelayMode = false end
     if type(data.authSync) ~= "boolean" then data.authSync = true end
     if data.dmPrivacy ~= "friends" and data.dmPrivacy ~= "none" then data.dmPrivacy = "anyone" end
@@ -1496,7 +1543,11 @@ function loadPrefs()
     state.autoHistorySync = data.autoHistorySync
     state.historySyncMode = data.historySyncMode
     state.clearEpoch = data.clearEpoch
+    state.deletedMessageIds = data.deletedMessageIds
+    state.syncGeneration = tonumber(data.syncGeneration) or 0
     if type(state.historyRequestTickets) ~= "table" then state.historyRequestTickets = {} end
+    if type(state.historyRequestMeta) ~= "table" then state.historyRequestMeta = {} end
+    if type(state.deletedMessageIds) ~= "table" then state.deletedMessageIds = {} end
     if type(state.relayStartupSynced) ~= "table" then state.relayStartupSynced = {} end
     state.p2pRelayMode = data.p2pRelayMode
     state.authSync = data.authSync
@@ -1655,11 +1706,66 @@ function messageWasCleared(key, epoch)
     return msgEpoch <= clearAt
 end
 
+function isDeletedMessage(key, msgId)
+    if not key or not msgId then return false end
+    return state.deletedMessageIds and state.deletedMessageIds[key] and state.deletedMessageIds[key][tostring(msgId)] == true
+end
+
+function rememberDeletedMessage(key, msgId)
+    if not key or not msgId then return end
+    state.deletedMessageIds = state.deletedMessageIds or {}
+    state.deletedMessageIds[key] = state.deletedMessageIds[key] or {}
+    state.deletedMessageIds[key][tostring(msgId)] = true
+end
+
+function markExistingMessagesDeleted(key)
+    if not key then return 0 end
+    local count = 0
+    for _, m in ipairs(state.messages[key] or {}) do
+        if type(m) == "table" then
+            local id = m.msgId or messageIdentity(key, m.from, m.body, m.kind, m)
+            if id then
+                m.msgId = id
+                rememberDeletedMessage(key, id)
+                count = count + 1
+            end
+        end
+    end
+    return count
+end
+
+function pruneDeletedMessageIds(key)
+    local ids = state.deletedMessageIds and state.deletedMessageIds[key]
+    if type(ids) ~= "table" then return end
+    local count = 0
+    for _ in pairs(ids) do count = count + 1 end
+    local limit = APP.historyKnownIdLimit or 160
+    if count <= limit * 2 then return end
+    -- Simple cap: keep table from growing forever by rebuilding with current messages plus recent tombstones best-effort.
+    local keep = {}
+    for _, m in ipairs(state.messages[key] or {}) do
+        if m and m.msgId then keep[m.msgId] = true end
+    end
+    local kept = 0
+    local rebuilt = {}
+    for id in pairs(ids) do
+        if keep[id] or kept < limit then
+            rebuilt[id] = true
+            kept = kept + 1
+        end
+    end
+    state.deletedMessageIds[key] = rebuilt
+end
+
 function markChatCleared(key)
     if not key or key == "" then return end
+    markExistingMessagesDeleted(key)
+    pruneDeletedMessageIds(key)
     state.clearEpoch = state.clearEpoch or {}
     state.clearEpoch[key] = os.time()
+    state.syncGeneration = (tonumber(state.syncGeneration or 0) or 0) + 1
     state.historyRequestTickets = {}
+    state.historyRequestMeta = {}
     state.relayLastSync = {}
 end
 
@@ -1692,6 +1798,10 @@ function addMessage(key, from, body, kind, meta)
 
     meta = meta or {}
     local msgId = messageIdentity(key, from, body, kind or "chat", meta)
+
+    if isDeletedMessage(key, msgId) then
+        return false
+    end
 
     if hasMessage(key, msgId) then
         return false
@@ -1817,6 +1927,8 @@ saveHistory = function()
         version = appVersion(),
         savedAt = os.time(),
         clearEpoch = state.clearEpoch or {},
+        deletedMessageIds = state.deletedMessageIds or {},
+        syncGeneration = state.syncGeneration or 0,
         messages = {},
         convos = {}
     }
@@ -1867,6 +1979,22 @@ function loadHistory()
                 state.clearEpoch[key] = tonumber(epoch)
             end
         end
+    end
+
+    if type(data.deletedMessageIds) == "table" then
+        state.deletedMessageIds = state.deletedMessageIds or {}
+        for key, ids in pairs(data.deletedMessageIds) do
+            if type(ids) == "table" then
+                state.deletedMessageIds[key] = state.deletedMessageIds[key] or {}
+                for msgId, flag in pairs(ids) do
+                    if flag then state.deletedMessageIds[key][msgId] = true end
+                end
+            end
+        end
+    end
+
+    if tonumber(data.syncGeneration) and tonumber(data.syncGeneration) > tonumber(state.syncGeneration or 0) then
+        state.syncGeneration = tonumber(data.syncGeneration)
     end
 
     if type(data.convos) == "table" then
@@ -1921,7 +2049,58 @@ function historyKeysForPeer(publicId)
     return keys
 end
 
-function makeHistoryBundle(keys, requesterPublicId, requesterClearEpoch)
+function makeHistoryWatermarks(keys)
+    local marks = {}
+    for _, key in ipairs(keys or historyKeysForPeer(nil)) do
+        local maxEpoch = 0
+        for _, m in ipairs(state.messages[key] or {}) do
+            local e = tonumber(m.epoch or 0) or 0
+            if e > maxEpoch then maxEpoch = e end
+        end
+        if maxEpoch > 0 then marks[key] = maxEpoch end
+    end
+    return marks
+end
+
+function makeKnownMessageIds(keys)
+    local known = {}
+    local limit = APP.historyKnownIdLimit or 160
+    for _, key in ipairs(keys or historyKeysForPeer(nil)) do
+        local out = {}
+        local list = state.messages[key] or {}
+        local startAt = math.max(1, #list - limit + 1)
+        for i = startAt, #list do
+            local m = list[i]
+            if type(m) == "table" then
+                local id = m.msgId or messageIdentity(key, m.from, m.body, m.kind, m)
+                if id then out[id] = true end
+            end
+        end
+        if state.deletedMessageIds and type(state.deletedMessageIds[key]) == "table" then
+            for id, flag in pairs(state.deletedMessageIds[key]) do
+                if flag then out[id] = true end
+            end
+        end
+        known[key] = out
+    end
+    return known
+end
+
+function shouldSendHistoryMessage(key, m, remoteClearAt, remoteKnownIds, remoteWatermark)
+    if type(m) ~= "table" or m.kind == "system" or not m.body then return false end
+    local msgId = m.msgId or messageIdentity(key, m.from, m.body, m.kind, m)
+    if not msgId then return false end
+    if remoteKnownIds and remoteKnownIds[msgId] then return false end
+    local mEpoch = tonumber(m.epoch or 0) or 0
+    if remoteClearAt and mEpoch > 0 and mEpoch <= remoteClearAt then return false end
+    if remoteWatermark and remoteWatermark > 0 and mEpoch > 0 and mEpoch <= remoteWatermark and not (remoteKnownIds and remoteKnownIds[msgId] == false) then
+        -- Watermarks are only a fast path. Known IDs do the real dedupe; keep a small overlap.
+        return false
+    end
+    return true
+end
+
+function makeHistoryBundle(keys, requesterPublicId, requesterClearEpoch, requesterDeletedIds, requesterKnownIds, requesterWatermarks)
     local bundles = {}
 
     for _, key in ipairs(keys or {}) do
@@ -1930,26 +2109,28 @@ function makeHistoryBundle(keys, requesterPublicId, requesterClearEpoch)
             local out = {}
             local startAt = math.max(1, #list - APP.historySyncLimit + 1)
             local remoteClearAt = requesterClearEpoch and tonumber(requesterClearEpoch[key])
+            local remoteDeleted = requesterDeletedIds and requesterDeletedIds[key]
+            local remoteKnown = requesterKnownIds and requesterKnownIds[key]
+            local remoteWatermark = requesterWatermarks and tonumber(requesterWatermarks[key] or 0)
 
             for i = startAt, #list do
                 local m = list[i]
+                local msgId = type(m) == "table" and (m.msgId or messageIdentity(key, m.from, m.body, m.kind, m)) or nil
 
-                if type(m) == "table" and m.kind ~= "system" and m.body then
-                    local mEpoch = tonumber(m.epoch or 0) or 0
-
-                    if not (remoteClearAt and mEpoch > 0 and mEpoch <= remoteClearAt) then
-                        table.insert(out, {
-                            from = m.from,
-                            body = m.body,
-                            kind = m.kind,
-                            time = m.time,
-                            epoch = m.epoch,
-                            msgId = m.msgId,
-                            fromId = m.fromId,
-                            outgoing = false,
-                            seen = m.seen
-                        })
-                    end
+                if msgId and remoteDeleted and remoteDeleted[msgId] then
+                    -- requester explicitly cleared/deleted this message; never resurrect it
+                elseif shouldSendHistoryMessage(key, m, remoteClearAt, remoteKnown, remoteWatermark) then
+                    table.insert(out, {
+                        from = m.from,
+                        body = m.body,
+                        kind = m.kind,
+                        time = m.time,
+                        epoch = m.epoch,
+                        msgId = msgId,
+                        fromId = m.fromId,
+                        outgoing = false,
+                        seen = m.seen
+                    })
                 end
             end
 
@@ -1995,7 +2176,7 @@ function importHistoryBundles(bundles, senderPublicId)
                 ensureConvo(key, bundle.title or key, bundle.type or "public", bundle.private or false, bundle.listed ~= false, bundle.owner or "history", bundle.type == "pm" and senderPublicId or bundle.peerId)
 
                 for _, m in ipairs(bundle.messages) do
-                    if type(m) == "table" and m.body and not messageWasCleared(key, m.epoch) then
+                    if type(m) == "table" and m.body and not messageWasCleared(key, m.epoch) and not isDeletedMessage(key, m.msgId or messageIdentity(key, m.from, m.body, m.kind, m)) then
                         local added = addMessage(key, m.from, m.body, m.kind, {
                             msgId = m.msgId,
                             fromId = m.fromId or senderPublicId,
@@ -2018,7 +2199,7 @@ function importHistoryBundles(bundles, senderPublicId)
     return imported
 end
 
-function requestHistorySync(senderId, publicId)
+function requestHistorySync(senderId, publicId, sourceKind)
     if not senderId or not publicId then return end
     if shouldShareHistoryWith and not shouldShareHistoryWith(publicId) then return end
 
@@ -2027,12 +2208,19 @@ function requestHistorySync(senderId, publicId)
         return
     end
 
+    local keys = historyKeysForPeer(publicId)
+    local reqId = noteHistoryRequest(publicId, nil, sourceKind or "peer")
     state.historySyncLast[publicId] = now
-    noteHistoryRequest(publicId)
 
     safeSendTo(senderId, "history_request", {
-        keys = historyKeysForPeer(publicId),
-        clearEpoch = state.clearEpoch or {}
+        syncVersion = 2,
+        requestId = reqId,
+        keys = keys,
+        clearEpoch = state.clearEpoch or {},
+        deletedIds = state.deletedMessageIds or {},
+        knownIds = makeKnownMessageIds(keys),
+        watermarks = makeHistoryWatermarks(keys),
+        syncGeneration = state.syncGeneration or 0
     })
 end
 
@@ -4359,7 +4547,7 @@ function handleSlashCommand(body)
         local count = 0
         for publicId, u in pairs(state.users or {}) do
             if u.senderId and shouldManualHistorySyncFrom(publicId, u) then
-                requestHistorySync(u.senderId, publicId)
+                requestHistorySync(u.senderId, publicId, "manual")
                 count = count + 1
             end
         end
@@ -6893,7 +7081,7 @@ function handleNetHello(senderId, msg)
     end
 
     if shouldAutoHistorySyncFrom(msg.publicId, msg) then
-        requestHistorySync(senderId, msg.publicId)
+        requestHistorySync(senderId, msg.publicId, "auto")
     end
     if state.authSync ~= false then
         requestRelaySync(senderId, msg.publicId, false)
@@ -6903,7 +7091,7 @@ end
 
 function handleNetHelloAck(senderId, msg)
     if shouldAutoHistorySyncFrom(msg.publicId, msg) then
-        requestHistorySync(senderId, msg.publicId)
+        requestHistorySync(senderId, msg.publicId, "auto")
     end
     if state.authSync ~= false then
         requestRelaySync(senderId, msg.publicId, false)
@@ -6937,7 +7125,9 @@ end
 function handleNetHistoryRequest(senderId, msg)
     if shouldShareHistoryWith(msg.publicId) then
         safeSendTo(senderId, "history_reply", {
-            bundles = makeHistoryBundle(msg.keys or {}, msg.publicId, msg.clearEpoch)
+            syncVersion = 2,
+            requestId = msg.requestId,
+            bundles = makeHistoryBundle(msg.keys or {}, msg.publicId, msg.clearEpoch, msg.deletedIds, msg.knownIds, msg.watermarks)
         })
     elseif state.securityAlerts ~= false then
         recordSecurityEvent("Blocked history sync request from non-friend #" .. shortId(msg.publicId) .. ".")
@@ -6945,10 +7135,13 @@ function handleNetHistoryRequest(senderId, msg)
 end
 
 function handleNetHistoryReply(senderId, msg)
-    if not hasRecentHistoryRequest(msg.publicId) then return end
+    if not hasRecentHistoryRequest(msg.publicId, msg.requestId) then return end
     local imported = importHistoryBundles(msg.bundles, msg.publicId)
+    finishHistoryRequest(msg.publicId)
     if imported > 0 then
-        addMessage("global", "system", "Synced " .. tostring(imported) .. " older message(s) from " .. displayName(msg.user, msg.publicId, msg.profile) .. ".", "system", { silent = true })
+        addMessage("system", "system", "Synced " .. tostring(imported) .. " history message(s) from " .. displayName(msg.user, msg.publicId, msg.profile) .. ".", "system", { silent = true })
+    else
+        addMessage("system", "system", "History sync complete from " .. displayName(msg.user, msg.publicId, msg.profile) .. ": no new messages.", "system", { silent = true })
     end
 end
 
@@ -7129,7 +7322,9 @@ function handleNetRelaySyncRequest(senderId, msg)
         payload.auth = loadAuthStore().accounts or {}
     end
     if msg.wantHistory == true then
-        payload.bundles = makeHistoryBundle(historyKeysForPeer(msg.publicId), msg.publicId, msg.clearEpoch)
+        payload.syncVersion = 2
+        payload.requestId = msg.requestId
+        payload.bundles = makeHistoryBundle(msg.keys or historyKeysForPeer(msg.publicId), msg.publicId, msg.clearEpoch, msg.deletedIds, msg.knownIds, msg.watermarks)
     end
     safeSendTo(senderId, "relay_sync_reply", payload)
 end
@@ -7141,10 +7336,13 @@ function handleNetRelaySyncReply(senderId, msg)
             addMessage("system", "system", "Synced " .. tostring(count) .. " auth record(s) from relay/peer.", "system", { silent = true })
         end
     end
-    if type(msg.bundles) == "table" and hasRecentHistoryRequest(msg.publicId) then
+    if type(msg.bundles) == "table" and hasRecentHistoryRequest(msg.publicId, msg.requestId) then
         local imported = importHistoryBundles(msg.bundles, msg.publicId)
+        finishHistoryRequest(msg.publicId)
         if imported > 0 then
-            addMessage("system", "system", "Relay synced " .. tostring(imported) .. " older message(s).", "system", { silent = true })
+            addMessage("system", "system", "Relay synced " .. tostring(imported) .. " history message(s).", "system", { silent = true })
+        else
+            addMessage("system", "system", "Relay sync complete: no new history.", "system", { silent = true })
         end
     end
 end
